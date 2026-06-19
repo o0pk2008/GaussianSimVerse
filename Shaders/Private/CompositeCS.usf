@@ -1,0 +1,32 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+// Composite Gaussian overlay onto resolved scene color (single pass, no MSAA corruption).
+
+#include "/Engine/Public/Platform.ush"
+
+float4 ViewRect;
+Texture2D<float4> SceneColorTexture;
+Texture2D<float4> OverlayTexture;
+RWTexture2D<float4> RWSceneColor;
+
+[numthreads(8, 8, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	const int2 Pixel = int2(DispatchThreadId.xy) + int2(ViewRect.xy);
+	const int2 ViewMax = int2(ViewRect.xy) + int2(ViewRect.zw) - int2(1, 1);
+	if (Pixel.x < int(ViewRect.x) || Pixel.y < int(ViewRect.y) || Pixel.x > ViewMax.x || Pixel.y > ViewMax.y)
+	{
+		return;
+	}
+
+	const float4 Scene = SceneColorTexture[Pixel];
+	const float4 Overlay = OverlayTexture[Pixel];
+	const float Alpha = saturate(Overlay.a);
+	if (Alpha <= (1.0 / 255.0))
+	{
+		return;
+	}
+
+	// Overlay stores premultiplied RGB from the raster pass.
+	const float3 OutRgb = Overlay.rgb + Scene.rgb * (1.0 - Alpha);
+	RWSceneColor[Pixel] = float4(OutRgb, Scene.a);
+}

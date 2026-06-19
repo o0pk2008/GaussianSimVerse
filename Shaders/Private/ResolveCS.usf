@@ -1,0 +1,40 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+// Convert atomic uint accumulators into premultiplied RGBA overlay.
+
+#include "/Engine/Public/Platform.ush"
+
+float4 ViewRect;
+Texture2D<uint> AccumAlpha;
+Texture2D<uint> AccumPremulR;
+Texture2D<uint> AccumPremulG;
+Texture2D<uint> AccumPremulB;
+RWTexture2D<float4> RWOverlay;
+
+static const float AccumScale = 1.0 / 65535.0;
+
+[numthreads(8, 8, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	const int2 Pixel = int2(DispatchThreadId.xy) + int2(ViewRect.xy);
+	const int2 ViewMax = int2(ViewRect.xy) + int2(ViewRect.zw) - int2(1, 1);
+	if (Pixel.x < int(ViewRect.x) || Pixel.y < int(ViewRect.y) || Pixel.x > ViewMax.x || Pixel.y > ViewMax.y)
+	{
+		return;
+	}
+
+	const uint RawAlphaFixed = AccumAlpha[Pixel];
+	if (RawAlphaFixed == 0u)
+	{
+		RWOverlay[Pixel] = float4(0.0, 0.0, 0.0, 0.0);
+		return;
+	}
+
+	const float Alpha = min(1.0, (float)RawAlphaFixed * AccumScale);
+	const float InvRawAlpha = rcp((float)RawAlphaFixed);
+	const float3 PremulRgb = float3(
+		(float)AccumPremulR[Pixel] * InvRawAlpha,
+		(float)AccumPremulG[Pixel] * InvRawAlpha,
+		(float)AccumPremulB[Pixel] * InvRawAlpha) * Alpha;
+
+	RWOverlay[Pixel] = float4(PremulRgb, Alpha);
+}

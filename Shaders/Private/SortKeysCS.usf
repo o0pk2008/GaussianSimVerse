@@ -1,0 +1,42 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+// Phase 4: build depth sort keys from visible Gaussians.
+
+#include "/Engine/Public/Platform.ush"
+#include "/Plugin/GaussianSimVerse/Private/GaussianCommon.ush"
+
+float4x4 LocalToWorldMatrix;
+float3 PreViewTranslation;
+float4x4 TranslatedViewMatrix;
+StructuredBuffer<uint> VisibleIndices;
+StructuredBuffer<uint> VisibleCountBuffer;
+StructuredBuffer<float4> GaussianPositions;
+RWStructuredBuffer<uint2> RWSortKeys;
+
+uint MaxVisibleCount;
+uint PaddedCount;
+
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	const uint ElementIndex = DispatchThreadId.x;
+	if (ElementIndex >= PaddedCount)
+	{
+		return;
+	}
+
+	const uint VisibleCount = min(VisibleCountBuffer[0], MaxVisibleCount);
+
+	if (ElementIndex >= VisibleCount)
+	{
+		RWSortKeys[ElementIndex] = uint2(0, 0xFFFFFFFF);
+		return;
+	}
+
+	const uint GaussianIndex = VisibleIndices[ElementIndex];
+	const float3 LocalPosition = GaussianPositions[GaussianIndex].xyz;
+	const float3 ViewPosition = LocalToViewPosition(LocalPosition, LocalToWorldMatrix, PreViewTranslation, TranslatedViewMatrix);
+	const float ViewDepth = ViewPosition.x;
+
+	const uint SortKey = 0xFFFFFFFF - asuint(ViewDepth);
+	RWSortKeys[ElementIndex] = uint2(SortKey, GaussianIndex);
+}

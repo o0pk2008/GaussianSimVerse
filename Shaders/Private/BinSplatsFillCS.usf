@@ -1,0 +1,102 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+// Fill per-tile splat lists using exclusive tile offsets (preserves global depth order).
+
+#include "/Engine/Public/Platform.ush"
+#include "/Plugin/GaussianSimVerse/Private/GaussianCommon.ush"
+
+float4x4 LocalToWorldMatrix;
+float3 PreViewTranslation;
+float4x4 TranslatedViewMatrix;
+float4x4 TranslatedWorldToClip;
+float4 ViewRect;
+StructuredBuffer<uint> SortedIndices;
+StructuredBuffer<uint> VisibleCountBuffer;
+StructuredBuffer<float4> GaussianSplatsVec4;
+StructuredBuffer<uint> TileOffsets;
+RWStructuredBuffer<uint> RWTileFillCounters;
+RWStructuredBuffer<uint> RWTileSplats;
+
+uint SortedCount;
+uint GaussianCount;
+uint NumTilesX;
+uint NumTilesY;
+uint MaxTileSplats;
+float SplatScale;
+uint MaxRasterRadius;
+uint bDebugOverlay;
+
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	const uint SortedIndex = DispatchThreadId.x;
+	const uint VisibleCount = min(SortedCount, VisibleCountBuffer[0]);
+	if (SortedIndex >= VisibleCount)
+	{
+		return;
+	}
+
+	const uint GaussianIndex = SortedIndices[SortedIndex];
+	if (GaussianIndex >= GaussianCount)
+	{
+		return;
+	}
+
+	const FGaussianSplatGPU Splat = LoadGaussianSplat(GaussianSplatsVec4, GaussianIndex);
+
+	float2 ScreenCenter;
+	float ScreenRadius;
+	float3 ViewPosition;
+	if (!ProjectSplatDisc(
+		Splat,
+		LocalToWorldMatrix,
+		PreViewTranslation,
+		TranslatedViewMatrix,
+		TranslatedWorldToClip,
+		ViewRect,
+		SplatScale,
+		MaxRasterRadius,
+		ScreenCenter,
+		ScreenRadius,
+		ViewPosition))
+	{
+		return;
+	}
+
+	if (bDebugOverlay != 0u)
+	{
+		ScreenRadius = 8.0;
+	}
+
+	const int2 ViewMin = int2(ViewRect.xy);
+	const int2 MinPixel = int2(floor(ScreenCenter - ScreenRadius));
+	const int2 MaxPixel = int2(ceil(ScreenCenter + ScreenRadius));
+
+	const int2 TileMin = int2(
+		max(0, (MinPixel.x - ViewMin.x) / GAUSSIAN_TILE_SIZE),
+		max(0, (MinPixel.y - ViewMin.y) / GAUSSIAN_TILE_SIZE));
+	const int2 TileMax = int2(
+		min((int)NumTilesX - 1, (MaxPixel.x - ViewMin.x) / GAUSSIAN_TILE_SIZE),
+		min((int)NumTilesY - 1, (MaxPixel.y - ViewMin.y) / GAUSSIAN_TILE_SIZE));
+
+	for (int TileY = TileMin.y; TileY <= TileMax.y; ++TileY)
+	{
+		for (int TileX = TileMin.x; TileX <= TileMax.x; ++TileX)
+		{
+			const uint TileId = (uint)TileY * NumTilesX + (uint)TileX;
+			const uint TileStart = TileOffsets[TileId];
+			const uint TileEnd = TileOffsets[TileId + 1u];
+			const uint TileCapacity = TileEnd - TileStart;
+			if (TileCapacity == 0u)
+			{
+				continue;
+			}
+
+			uint LocalSlot;
+			InterlockedAdd(RWTileFillCounters[TileId], 1u, LocalSlot);
+			if (LocalSlot < TileCapacity)
+			{
+				RWTileSplats[TileStart + LocalSlot] = GaussianIndex;
+			}
+		}
+	}
+}

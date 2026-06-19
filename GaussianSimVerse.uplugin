@@ -1,0 +1,29 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "GaussianSimVerse",
+	"Description": "Robot simulation platform based on Gaussian Splatting scenes. Supports ROS2 sensors, LiDAR, RGB/Depth cameras, and GPU-driven splat rendering via RDG.",
+	"Category": "Simulation",
+	"CreatedBy": "Ning",
+	"CreatedByURL": "https://ning-studio.vercel.app/",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": true,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "GaussianSimVerse",
+			"Type": "Runtime",
+			"LoadingPhase": "PostConfigInit"
+		},
+		{
+			"Name": "GaussianSimVerseEditor",
+			"Type": "Editor",
+			"LoadingPhase": "PostEngineInit"
+		}
+	]
+}

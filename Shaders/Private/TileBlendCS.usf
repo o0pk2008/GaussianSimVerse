@@ -1,0 +1,114 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+// Per-tile front-to-back premultiplied alpha blending.
+
+#include "/Engine/Public/Platform.ush"
+#include "/Plugin/GaussianSimVerse/Private/GaussianCommon.ush"
+
+float4x4 LocalToWorldMatrix;
+float3 PreViewTranslation;
+float4x4 TranslatedViewMatrix;
+float4x4 TranslatedWorldToClip;
+float4 ViewRect;
+StructuredBuffer<uint> TileOffsets;
+StructuredBuffer<uint> TileSplats;
+StructuredBuffer<float4> GaussianSplatsVec4;
+RWTexture2D<float4> RWOverlay;
+
+uint NumTilesX;
+uint NumTilesY;
+uint NumTiles;
+uint GaussianCount;
+float SplatScale;
+uint MaxRasterRadius;
+uint bDebugOverlay;
+
+[numthreads(GAUSSIAN_TILE_SIZE, GAUSSIAN_TILE_SIZE, 1)]
+void MainCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupThreadID)
+{
+	const uint TileX = GroupId.x;
+	const uint TileY = GroupId.y;
+	if (TileX >= NumTilesX || TileY >= NumTilesY)
+	{
+		return;
+	}
+
+	const int2 Pixel = int2(ViewRect.xy) + int2(TileX, TileY) * GAUSSIAN_TILE_SIZE + int2(GroupThreadId.xy);
+	const int2 ViewMax = int2(ViewRect.xy) + int2(ViewRect.zw) - int2(1, 1);
+	if (Pixel.x < int(ViewRect.x) || Pixel.y < int(ViewRect.y) || Pixel.x > ViewMax.x || Pixel.y > ViewMax.y)
+	{
+		return;
+	}
+
+	const uint TileId = TileY * NumTilesX + TileX;
+	const uint SplatStart = TileOffsets[TileId];
+	const uint SplatEnd = TileOffsets[TileId + 1u];
+	const uint SplatCount = SplatEnd - SplatStart;
+
+	float3 AccumRgb = 0.0;
+	float Transmittance = 1.0;
+
+	for (uint SplatSlot = 0u; SplatSlot < SplatCount; ++SplatSlot)
+	{
+		const uint GaussianIndex = TileSplats[SplatStart + SplatSlot];
+		if (GaussianIndex >= GaussianCount)
+		{
+			continue;
+		}
+
+		const FGaussianSplatGPU Splat = LoadGaussianSplat(GaussianSplatsVec4, GaussianIndex);
+
+		float2 ScreenCenter;
+		float ScreenRadius;
+		float3 ViewPosition;
+		if (!ProjectSplatDisc(
+			Splat,
+			LocalToWorldMatrix,
+			PreViewTranslation,
+			TranslatedViewMatrix,
+			TranslatedWorldToClip,
+			ViewRect,
+			SplatScale,
+			MaxRasterRadius,
+			ScreenCenter,
+			ScreenRadius,
+			ViewPosition))
+		{
+			continue;
+		}
+
+		if (bDebugOverlay != 0u)
+		{
+			ScreenRadius = 8.0;
+		}
+
+		const float Alpha = EvaluateSplatAlpha(float2(Pixel), ScreenCenter, ScreenRadius, Splat.Opacity, bDebugOverlay);
+		if (Alpha < (1.0 / 255.0))
+		{
+			continue;
+		}
+
+		float3 Color = Splat.Color.rgb;
+		if (bDebugOverlay != 0u)
+		{
+			Color = float3(1.0, 0.1, 0.8);
+		}
+
+		AccumRgb += Color * Alpha * Transmittance;
+		Transmittance *= (1.0 - Alpha);
+		if (Transmittance < (1.0 / 255.0))
+		{
+			break;
+		}
+	}
+
+	const float Coverage = saturate(1.0 - Transmittance);
+	if (Coverage > (1.0 / 255.0))
+	{
+		const float4 Existing = RWOverlay[Pixel];
+		const float3 PremulRgb = AccumRgb;
+		const float ExistingAlpha = Existing.a;
+		const float OutAlpha = Coverage + ExistingAlpha * (1.0 - Coverage);
+		const float3 OutRgb = PremulRgb + Existing.rgb * (1.0 - Coverage);
+		RWOverlay[Pixel] = float4(OutRgb, OutAlpha);
+	}
+}

@@ -1,0 +1,34 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+// Phase 4: bitonic sort compare-exchange step.
+
+#include "/Engine/Public/Platform.ush"
+#include "/Plugin/GaussianSimVerse/Private/GaussianCommon.ush"
+
+RWStructuredBuffer<uint2> RWSortKeys;
+
+uint K;
+uint J;
+uint PaddedCount;
+
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	const uint Index = DispatchThreadId.x;
+	const uint PartnerIndex = Index ^ J;
+
+	if (PartnerIndex <= Index || PartnerIndex >= PaddedCount)
+	{
+		return;
+	}
+
+	uint2 KeyA = RWSortKeys[Index];
+	uint2 KeyB = RWSortKeys[PartnerIndex];
+
+	const bool bAscending = ((Index & K) == 0);
+	const bool bShouldSwap = bAscending ? (KeyA.x > KeyB.x) : (KeyA.x < KeyB.x);
+	if (bShouldSwap)
+	{
+		RWSortKeys[Index] = KeyB;
+		RWSortKeys[PartnerIndex] = KeyA;
+	}
+}

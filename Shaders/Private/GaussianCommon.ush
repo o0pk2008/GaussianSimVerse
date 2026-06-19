@@ -1,0 +1,220 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+// Shared constants and structs for GaussianSimVerse compute shaders.
+
+#ifndef GAUSSIAN_COMMON_USH
+#define GAUSSIAN_COMMON_USH
+
+#ifndef THREADGROUP_SIZE
+#define THREADGROUP_SIZE 64
+#endif
+
+#ifndef GAUSSIAN_TILE_SIZE
+#define GAUSSIAN_TILE_SIZE 16
+#endif
+
+#ifndef GAUSSIAN_MAX_SPLATS_PER_TILE
+#define GAUSSIAN_MAX_SPLATS_PER_TILE 4096
+#endif
+
+struct FGaussianSplatGPU
+{
+	float3 Position;
+	float Opacity;
+	float4 Rotation;
+	float3 Scale;
+	float Padding;
+	float4 Color;
+};
+
+struct FGaussianSceneParamsGPU
+{
+	uint SceneCount;
+	uint GaussianCount;
+	uint MaxGaussiansPerScene;
+	uint Padding;
+};
+
+/** Homogeneous clip-space frustum test (UE reversed-Z, perspective W > 0). */
+bool GaussianFrustumVisible(float4 ClipPosition, float Margin)
+{
+	const float W = ClipPosition.w;
+	if (W <= 1e-4)
+	{
+		return false;
+	}
+
+	const float ExpandedW = W * (1.0 + Margin);
+	return abs(ClipPosition.x) <= ExpandedW
+		&& abs(ClipPosition.y) <= ExpandedW
+		&& ClipPosition.z >= 0.0
+		&& ClipPosition.z <= W;
+}
+
+/** Raster path: only reject splats clearly behind the camera. */
+bool GaussianRasterVisible(float4 ClipPosition)
+{
+	return ClipPosition.w > 1e-4;
+}
+
+static const uint GaussianSplatFloat4Stride = 4u;
+
+FGaussianSplatGPU LoadGaussianSplat(StructuredBuffer<float4> GaussianSplatsVec4, uint Index)
+{
+	const uint Base = Index * GaussianSplatFloat4Stride;
+	const float4 V0 = GaussianSplatsVec4[Base + 0u];
+	const float4 V1 = GaussianSplatsVec4[Base + 1u];
+	const float4 V2 = GaussianSplatsVec4[Base + 2u];
+	const float4 V3 = GaussianSplatsVec4[Base + 3u];
+
+	FGaussianSplatGPU Splat;
+	Splat.Position = V0.xyz;
+	Splat.Opacity = V0.w;
+	Splat.Rotation = V1;
+	Splat.Scale = V2.xyz;
+	Splat.Padding = V2.w;
+	Splat.Color = V3;
+	return Splat;
+}
+
+float3x3 QuatToMat3(float4 Q)
+{
+	const float4 N = normalize(Q);
+	const float X = N.x;
+	const float Y = N.y;
+	const float Z = N.z;
+	const float W = N.w;
+
+	return float3x3(
+		1.0 - 2.0 * (Y * Y + Z * Z), 2.0 * (X * Y - W * Z), 2.0 * (X * Z + W * Y),
+		2.0 * (X * Y + W * Z), 1.0 - 2.0 * (X * X + Z * Z), 2.0 * (Y * Z - W * X),
+		2.0 * (X * Z - W * Y), 2.0 * (Y * Z + W * X), 1.0 - 2.0 * (X * X + Y * Y));
+}
+
+float3 LocalDirectionToView(float3 LocalDirection, float4x4 LocalToWorldMatrix, float4x4 TranslatedViewMatrix)
+{
+	const float3 WorldDirection = mul(float4(LocalDirection, 0.0), LocalToWorldMatrix).xyz;
+	return mul((float3x3)TranslatedViewMatrix, WorldDirection);
+}
+
+float3 LocalToViewPosition(float3 LocalPosition, float4x4 LocalToWorldMatrix, float3 PreViewTranslation, float4x4 TranslatedViewMatrix)
+{
+	const float3 WorldPosition = mul(float4(LocalPosition, 1.0), LocalToWorldMatrix).xyz;
+	const float3 TranslatedWorldPosition = WorldPosition + PreViewTranslation;
+	return mul(float4(TranslatedWorldPosition, 1.0), TranslatedViewMatrix).xyz;
+}
+
+float4 LocalToClipPosition(float3 LocalPosition, float4x4 LocalToWorldMatrix, float3 PreViewTranslation, float4x4 TranslatedWorldToClip)
+{
+	const float3 WorldPosition = mul(float4(LocalPosition, 1.0), LocalToWorldMatrix).xyz;
+	const float3 TranslatedWorldPosition = WorldPosition + PreViewTranslation;
+	return mul(float4(TranslatedWorldPosition, 1.0), TranslatedWorldToClip);
+}
+
+float2 ClipToViewport(float4 ClipPosition, float4 ViewportRect)
+{
+	const float InvW = rcp(ClipPosition.w);
+	const float2 NDC = ClipPosition.xy * InvW;
+	return float2(
+		(NDC.x * 0.5 + 0.5) * ViewportRect.z + ViewportRect.x,
+		(-NDC.y * 0.5 + 0.5) * ViewportRect.w + ViewportRect.y);
+}
+
+float2 ViewportToTexture(float2 ViewportPixel, float4 ViewportRect, float4 TextureRect)
+{
+	const float2 Relative = (ViewportPixel - ViewportRect.xy) / max(ViewportRect.zw, float2(1.0, 1.0));
+	return Relative * TextureRect.zw + TextureRect.xy;
+}
+
+float2 ClipToScreen(float4 ClipPosition, float4 ViewportRect, float4 TextureRect)
+{
+	return ViewportToTexture(ClipToViewport(ClipPosition, ViewportRect), ViewportRect, TextureRect);
+}
+
+// Legacy single-rect helper (viewport == texture).
+float2 ClipToScreen(float4 ClipPosition, float4 ViewRect)
+{
+	return ClipToScreen(ClipPosition, ViewRect, ViewRect);
+}
+
+float ComputeScreenRadius(
+	FGaussianSplatGPU Splat,
+	float3 ViewPosition,
+	float4x4 LocalToWorldMatrix,
+	float4x4 TranslatedViewMatrix,
+	float4x4 TranslatedWorldToClip,
+	float4 ViewRect,
+	float SplatScale,
+	uint MaxRasterRadius)
+{
+	const float Depth = max(ViewPosition.x, 1e-2);
+	const float3x3 Rot = QuatToMat3(Splat.Rotation);
+	const float3 Scales = Splat.Scale;
+
+	const float3 Axis0 = LocalDirectionToView(mul(Rot, float3(Scales.x, 0.0, 0.0)), LocalToWorldMatrix, TranslatedViewMatrix);
+	const float3 Axis1 = LocalDirectionToView(mul(Rot, float3(0.0, Scales.y, 0.0)), LocalToWorldMatrix, TranslatedViewMatrix);
+	const float3 Axis2 = LocalDirectionToView(mul(Rot, float3(0.0, 0.0, Scales.z)), LocalToWorldMatrix, TranslatedViewMatrix);
+
+	const float2 Extent0 = float2(dot(Axis0, float3(0.0, 1.0, 0.0)), dot(Axis0, float3(0.0, 0.0, 1.0)));
+	const float2 Extent1 = float2(dot(Axis1, float3(0.0, 1.0, 0.0)), dot(Axis1, float3(0.0, 0.0, 1.0)));
+	const float2 Extent2 = float2(dot(Axis2, float3(0.0, 1.0, 0.0)), dot(Axis2, float3(0.0, 0.0, 1.0)));
+
+	const float ExtentSq = max(dot(Extent0, Extent0), max(dot(Extent1, Extent1), dot(Extent2, Extent2)));
+	const float FocalPixels = abs(TranslatedWorldToClip[0][0]) * ViewRect.z * 0.5;
+	const float Radius = sqrt(max(ExtentSq, 1e-8)) * FocalPixels / Depth * SplatScale;
+	return clamp(Radius, 1.0, (float)MaxRasterRadius);
+}
+
+bool ProjectSplatDisc(
+	FGaussianSplatGPU Splat,
+	float4x4 LocalToWorldMatrix,
+	float3 PreViewTranslation,
+	float4x4 TranslatedViewMatrix,
+	float4x4 TranslatedWorldToClip,
+	float4 ViewRect,
+	float SplatScale,
+	uint MaxRasterRadius,
+	out float2 ScreenCenter,
+	out float ScreenRadius,
+	out float3 ViewPosition)
+{
+	ViewPosition = LocalToViewPosition(Splat.Position, LocalToWorldMatrix, PreViewTranslation, TranslatedViewMatrix);
+	if (ViewPosition.x <= 1e-2)
+	{
+		return false;
+	}
+
+	const float4 ClipPosition = LocalToClipPosition(Splat.Position, LocalToWorldMatrix, PreViewTranslation, TranslatedWorldToClip);
+	if (!GaussianRasterVisible(ClipPosition))
+	{
+		return false;
+	}
+
+	ScreenCenter = ClipToScreen(ClipPosition, ViewRect);
+	ScreenRadius = ComputeScreenRadius(
+		Splat,
+		ViewPosition,
+		LocalToWorldMatrix,
+		TranslatedViewMatrix,
+		TranslatedWorldToClip,
+		ViewRect,
+		SplatScale,
+		MaxRasterRadius);
+	return true;
+}
+
+float EvaluateSplatAlpha(float2 Pixel, float2 ScreenCenter, float ScreenRadius, float Opacity, uint bDebugOverlay)
+{
+	if (bDebugOverlay != 0u)
+	{
+		const float2 Delta = Pixel - ScreenCenter;
+		return dot(Delta, Delta) <= ScreenRadius * ScreenRadius ? 1.0 : 0.0;
+	}
+
+	const float2 Delta = Pixel - ScreenCenter;
+	const float DistSq = dot(Delta, Delta);
+	const float Sigma = max(ScreenRadius * 0.35, 0.5);
+	const float Gaussian = exp(-0.5 * DistSq / (Sigma * Sigma));
+	return saturate(Opacity * Gaussian);
+}
+
+#endif // GAUSSIAN_COMMON_USH

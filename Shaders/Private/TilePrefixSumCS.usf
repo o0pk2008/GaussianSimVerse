@@ -1,0 +1,23 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+// Exclusive prefix sum for per-tile splat counts.
+
+#include "/Engine/Public/Platform.ush"
+
+StructuredBuffer<uint> TileCounts;
+RWStructuredBuffer<uint> RWTileOffsets;
+RWStructuredBuffer<uint> RWTotalTileSplats;
+
+uint NumTiles;
+
+[numthreads(1, 1, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	uint Offset = 0u;
+	for (uint TileId = 0u; TileId < NumTiles; ++TileId)
+	{
+		RWTileOffsets[TileId] = Offset;
+		Offset += TileCounts[TileId];
+	}
+	RWTileOffsets[NumTiles] = Offset;
+	RWTotalTileSplats[0] = Offset;
+}

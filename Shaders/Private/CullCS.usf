@@ -1,0 +1,43 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+// Phase 3: GPU frustum cull.
+
+#include "/Engine/Public/Platform.ush"
+#include "/Plugin/GaussianSimVerse/Private/GaussianCommon.ush"
+
+float4x4 LocalToWorldMatrix;
+float3 PreViewTranslation;
+float4x4 TranslatedWorldToClip;
+StructuredBuffer<float4> GaussianPositions;
+RWStructuredBuffer<uint> RWVisibleIndices;
+RWStructuredBuffer<uint> RWVisibleCount;
+
+uint GaussianCount;
+float FrustumMargin;
+
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	const uint GaussianIndex = DispatchThreadId.x;
+	if (GaussianIndex >= GaussianCount)
+	{
+		return;
+	}
+
+	const float3 LocalPosition = GaussianPositions[GaussianIndex].xyz;
+	const float3 WorldPosition = mul(float4(LocalPosition, 1.0), LocalToWorldMatrix).xyz;
+	const float3 TranslatedWorldPosition = WorldPosition + PreViewTranslation;
+	const float4 ClipPosition = mul(float4(TranslatedWorldPosition, 1.0), TranslatedWorldToClip);
+
+	if (!GaussianFrustumVisible(ClipPosition, FrustumMargin))
+	{
+		return;
+	}
+
+	uint VisibleIndex;
+	InterlockedAdd(RWVisibleCount[0], 1, VisibleIndex);
+
+	if (VisibleIndex < GaussianCount)
+	{
+		RWVisibleIndices[VisibleIndex] = GaussianIndex;
+	}
+}

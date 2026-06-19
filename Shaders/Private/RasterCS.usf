@@ -1,0 +1,136 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+// GPU Gaussian rasterizer — atomic accumulation with saturated alpha.
+
+#include "/Engine/Public/Platform.ush"
+#include "/Plugin/GaussianSimVerse/Private/GaussianCommon.ush"
+
+float4x4 LocalToWorldMatrix;
+float3 PreViewTranslation;
+float4x4 TranslatedWorldToClip;
+float4 ViewportRect;
+float4 ViewRect;
+StructuredBuffer<uint> SortedIndices;
+StructuredBuffer<uint> VisibleCountBuffer;
+StructuredBuffer<float4> GaussianSplatsVec4;
+RWTexture2D<uint> RWAccumAlpha;
+RWTexture2D<uint> RWAccumPremulR;
+RWTexture2D<uint> RWAccumPremulG;
+RWTexture2D<uint> RWAccumPremulB;
+
+uint SortedCount;
+uint GaussianCount;
+float SplatScale;
+uint MaxRasterRadius;
+uint bDebugOverlay;
+
+static const uint AccumFixedScale = 65535u;
+static const uint AccumFixedMax = 65535u;
+
+void AtomicAddSaturated(RWTexture2D<uint> Buffer, int2 Pixel, uint Value)
+{
+	[allow_uav_condition]
+	for (;;)
+	{
+		uint OldValue = Buffer[Pixel];
+		const uint NewValue = min(AccumFixedMax, OldValue + Value);
+		uint PrevValue;
+		InterlockedCompareExchange(Buffer[Pixel], OldValue, NewValue, PrevValue);
+		if (PrevValue == OldValue)
+		{
+			break;
+		}
+	}
+}
+
+void AtomicAccumulate(int2 Pixel, float3 Color, float Alpha)
+{
+	const uint AlphaFixed = (uint)(saturate(Alpha) * (float)AccumFixedScale);
+	if (AlphaFixed == 0u)
+	{
+		return;
+	}
+
+	const uint PremulR = (uint)(saturate(Color.r * Alpha) * (float)AccumFixedScale);
+	const uint PremulG = (uint)(saturate(Color.g * Alpha) * (float)AccumFixedScale);
+	const uint PremulB = (uint)(saturate(Color.b * Alpha) * (float)AccumFixedScale);
+
+	AtomicAddSaturated(RWAccumAlpha, Pixel, AlphaFixed);
+	AtomicAddSaturated(RWAccumPremulR, Pixel, PremulR);
+	AtomicAddSaturated(RWAccumPremulG, Pixel, PremulG);
+	AtomicAddSaturated(RWAccumPremulB, Pixel, PremulB);
+}
+
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	const uint SortedIndex = DispatchThreadId.x;
+	const uint VisibleCount = min(SortedCount, VisibleCountBuffer[0]);
+	if (SortedIndex >= VisibleCount)
+	{
+		return;
+	}
+
+	const uint GaussianIndex = SortedIndices[SortedIndex];
+	if (GaussianIndex >= GaussianCount)
+	{
+		return;
+	}
+
+	const FGaussianSplatGPU Splat = LoadGaussianSplat(GaussianSplatsVec4, GaussianIndex);
+
+	const float4 ClipPos = LocalToClipPosition(Splat.Position, LocalToWorldMatrix, PreViewTranslation, TranslatedWorldToClip);
+	if (!GaussianRasterVisible(ClipPos))
+	{
+		return;
+	}
+
+	const float2 ScreenCenter = ClipToScreen(ClipPos, ViewportRect, ViewRect);
+
+	float Radius = 8.0;
+	if (bDebugOverlay == 0u)
+	{
+		const float MaxScale = max(Splat.Scale.x, max(Splat.Scale.y, Splat.Scale.z));
+		const float Depth = max(ClipPos.w, 1e-2);
+		const float FocalPixels = abs(TranslatedWorldToClip[0][0]) * ViewportRect.z * 0.5;
+		Radius = clamp(
+			MaxScale * FocalPixels / Depth * SplatScale,
+			1.0,
+			(float)MaxRasterRadius);
+	}
+
+	const int2 ViewMin = int2(ViewRect.xy);
+	const int2 ViewMax = int2(ViewRect.xy) + int2(ViewRect.zw) - int2(1, 1);
+	const int2 MinPixel = int2(floor(ScreenCenter - Radius));
+	const int2 MaxPixel = int2(ceil(ScreenCenter + Radius));
+
+	for (int Y = max(MinPixel.y, ViewMin.y); Y <= min(MaxPixel.y, ViewMax.y); ++Y)
+	{
+		for (int X = max(MinPixel.x, ViewMin.x); X <= min(MaxPixel.x, ViewMax.x); ++X)
+		{
+			const float2 Delta = float2(X, Y) - ScreenCenter;
+			const float DistSq = dot(Delta, Delta);
+			const float SigmaSq = Radius * Radius;
+			if (DistSq > SigmaSq)
+			{
+				continue;
+			}
+
+			float Alpha = 1.0;
+			float3 Color = float3(1.0, 0.1, 0.8);
+
+			if (bDebugOverlay == 0u)
+			{
+				const float Sigma = max(Radius * 0.35, 0.5);
+				const float Gaussian = exp(-0.5 * DistSq / (Sigma * Sigma));
+				Alpha = saturate(Splat.Opacity * Gaussian);
+				Color = Splat.Color.rgb;
+				if (Alpha < (1.0 / 255.0))
+				{
+					continue;
+				}
+			}
+
+			AtomicAccumulate(int2(X, Y), Color, Alpha);
+		}
+	}
+}

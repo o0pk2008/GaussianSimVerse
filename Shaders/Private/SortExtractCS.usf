@@ -1,0 +1,22 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+// Phase 4: extract sorted indices after bitonic sort.
+
+#include "/Engine/Public/Platform.ush"
+#include "/Plugin/GaussianSimVerse/Private/GaussianCommon.ush"
+
+StructuredBuffer<uint2> SortKeys;
+RWStructuredBuffer<uint> RWSortedIndices;
+
+uint MaxVisibleCount;
+
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	const uint ElementIndex = DispatchThreadId.x;
+	if (ElementIndex >= MaxVisibleCount)
+	{
+		return;
+	}
+
+	RWSortedIndices[ElementIndex] = SortKeys[ElementIndex].y;
+}
