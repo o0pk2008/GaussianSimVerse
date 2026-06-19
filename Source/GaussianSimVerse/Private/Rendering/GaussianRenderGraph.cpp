@@ -11,6 +11,8 @@
 
 namespace GaussianRenderGraphPrivate
 {
+	static constexpr uint32 SplatsPerRasterBatch = 2048;
+
 	static uint32 GetPaddedSortCount(uint32 VisibleCount)
 	{
 		const int32 MaxSort = FMath::Max(2, GaussianSimVerse::RenderSettings::CVarMaxSortElements.GetValueOnRenderThread());
@@ -362,7 +364,6 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 
 	const FGlobalShaderMap* GlobalShaderMap = GetGlobalShaderMap(GMaxRHIFeatureLevel);
 	const TShaderMapRef<FGaussianRasterCS> RasterShader(GlobalShaderMap);
-	const TShaderMapRef<FGaussianResolveCS> ResolveShader(GlobalShaderMap);
 	if (!RasterShader.IsValid())
 	{
 		UE_LOG(LogGaussianSimVerse, Warning, TEXT("GaussianSimVerse raster shader is not compiled for this platform/feature level."));
@@ -375,27 +376,6 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 	FRDGTextureRef OverlayTexture = GraphBuilder.CreateTexture(OverlayDesc, TEXT("Gaussian.SplatOverlay"));
 	FRDGTextureUAVRef OverlayUAV = GraphBuilder.CreateUAV(OverlayTexture);
 	AddClearUAVPass(GraphBuilder, OverlayUAV, FVector4f(0.0f, 0.0f, 0.0f, 0.0f));
-
-	const FRDGTextureDesc AccumDesc = FRDGTextureDesc::Create2D(
-		SceneColorTexture->Desc.Extent,
-		PF_R32_UINT,
-		FClearValueBinding::None,
-		ETextureCreateFlags::ShaderResource | ETextureCreateFlags::UAV);
-
-	FRDGTextureRef AccumAlphaTexture = GraphBuilder.CreateTexture(AccumDesc, TEXT("Gaussian.AccumAlpha"));
-	FRDGTextureRef AccumPremulRTexture = GraphBuilder.CreateTexture(AccumDesc, TEXT("Gaussian.AccumPremulR"));
-	FRDGTextureRef AccumPremulGTexture = GraphBuilder.CreateTexture(AccumDesc, TEXT("Gaussian.AccumPremulG"));
-	FRDGTextureRef AccumPremulBTexture = GraphBuilder.CreateTexture(AccumDesc, TEXT("Gaussian.AccumPremulB"));
-
-	FRDGTextureUAVRef AccumAlphaUAV = GraphBuilder.CreateUAV(AccumAlphaTexture);
-	FRDGTextureUAVRef AccumPremulRUAV = GraphBuilder.CreateUAV(AccumPremulRTexture);
-	FRDGTextureUAVRef AccumPremulGUAV = GraphBuilder.CreateUAV(AccumPremulGTexture);
-	FRDGTextureUAVRef AccumPremulBUAV = GraphBuilder.CreateUAV(AccumPremulBTexture);
-
-	AddClearUAVPass(GraphBuilder, AccumAlphaUAV, 0u);
-	AddClearUAVPass(GraphBuilder, AccumPremulRUAV, 0u);
-	AddClearUAVPass(GraphBuilder, AccumPremulGUAV, 0u);
-	AddClearUAVPass(GraphBuilder, AccumPremulBUAV, 0u);
 
 	const FVector4f ViewportRect(
 		static_cast<float>(Inputs.ViewData.ViewRect.Min.X),
@@ -476,60 +456,45 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 
 		const FGaussianRDGBufferBinding& Binding = TransientResources.GPUBuffers[CullResult.GPUBindingIndex];
 
-		FGaussianRasterCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FGaussianRasterCS::FParameters>();
-		PassParameters->LocalToWorldMatrix = FMatrix44f(Binding.LocalToWorld);
-		PassParameters->PreViewTranslation = PreViewTranslation;
-		PassParameters->TranslatedWorldToClip = TranslatedWorldToClip;
-		PassParameters->ViewportRect = ViewportRect;
-		PassParameters->ViewRect = ViewRect;
-		PassParameters->SortedCount = SortedCount;
-		PassParameters->GaussianCount = Binding.NumGaussians;
-		PassParameters->SplatScale = SplatScale;
-		PassParameters->MaxRasterRadius = MaxRasterRadius;
-		PassParameters->bDebugOverlay = bDebugOverlay ? 1u : 0u;
-		PassParameters->SortedIndices = SortedIndicesSRV;
-		PassParameters->VisibleCountBuffer = CullResult.VisibleCountSRV;
-		PassParameters->GaussianSplatsVec4 = Binding.SplatSRV;
-		PassParameters->RWAccumAlpha = AccumAlphaUAV;
-		PassParameters->RWAccumPremulR = AccumPremulRUAV;
-		PassParameters->RWAccumPremulG = AccumPremulGUAV;
-		PassParameters->RWAccumPremulB = AccumPremulBUAV;
+		for (uint32 BatchStart = 0; BatchStart < SortedCount; BatchStart += GaussianRenderGraphPrivate::SplatsPerRasterBatch)
+		{
+			const uint32 BatchCount = FMath::Min(
+				GaussianRenderGraphPrivate::SplatsPerRasterBatch,
+				SortedCount - BatchStart);
 
-		const uint32 NumGroups = FMath::DivideAndRoundUp(SortedCount, GaussianThreadGroupSize);
-		FComputeShaderUtils::AddPass(
-			GraphBuilder,
-			RDG_EVENT_NAME("GaussianSimVerse::Raster S%u C%u (%u)", Binding.SceneId, Binding.ChunkIndex, SortedCount),
-			ERDGPassFlags::Compute,
-			RasterShader,
-			PassParameters,
-			FIntVector(NumGroups, 1, 1));
+			FGaussianRasterCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FGaussianRasterCS::FParameters>();
+			PassParameters->LocalToWorldMatrix = FMatrix44f(Binding.LocalToWorld);
+			PassParameters->PreViewTranslation = PreViewTranslation;
+			PassParameters->TranslatedWorldToClip = TranslatedWorldToClip;
+			PassParameters->ViewportRect = ViewportRect;
+			PassParameters->ViewRect = ViewRect;
+			PassParameters->BatchStart = BatchStart;
+			PassParameters->BatchCount = BatchCount;
+			PassParameters->SortedCount = SortedCount;
+			PassParameters->GaussianCount = Binding.NumGaussians;
+			PassParameters->SplatScale = SplatScale;
+			PassParameters->MaxRasterRadius = MaxRasterRadius;
+			PassParameters->bDebugOverlay = bDebugOverlay ? 1u : 0u;
+			PassParameters->SortedIndices = SortedIndicesSRV;
+			PassParameters->VisibleCountBuffer = CullResult.VisibleCountSRV;
+			PassParameters->GaussianSplatsVec4 = Binding.SplatSRV;
+			PassParameters->RWOverlay = OverlayUAV;
+
+			const uint32 NumGroups = FMath::DivideAndRoundUp(BatchCount, GaussianThreadGroupSize);
+			FComputeShaderUtils::AddPass(
+				GraphBuilder,
+				RDG_EVENT_NAME("GaussianSimVerse::Raster S%u C%u (%u..%u)", Binding.SceneId, Binding.ChunkIndex, BatchStart, BatchStart + BatchCount),
+				ERDGPassFlags::Compute,
+				RasterShader,
+				PassParameters,
+				FIntVector(NumGroups, 1, 1));
+		}
 
 		TotalRasterSplats += SortedCount;
 	}
 
 	if (TotalRasterSplats > 0)
 	{
-		if (ResolveShader.IsValid())
-		{
-			FGaussianResolveCS::FParameters* ResolveParams = GraphBuilder.AllocParameters<FGaussianResolveCS::FParameters>();
-			ResolveParams->ViewRect = ViewRect;
-			ResolveParams->AccumAlpha = AccumAlphaTexture;
-			ResolveParams->AccumPremulR = AccumPremulRTexture;
-			ResolveParams->AccumPremulG = AccumPremulGTexture;
-			ResolveParams->AccumPremulB = AccumPremulBTexture;
-			ResolveParams->RWOverlay = OverlayUAV;
-
-			const uint32 ResolveGroupsX = FMath::DivideAndRoundUp(static_cast<uint32>(Inputs.SceneColorViewRect.Width()), 8u);
-			const uint32 ResolveGroupsY = FMath::DivideAndRoundUp(static_cast<uint32>(Inputs.SceneColorViewRect.Height()), 8u);
-			FComputeShaderUtils::AddPass(
-				GraphBuilder,
-				RDG_EVENT_NAME("GaussianSimVerse::Resolve"),
-				ERDGPassFlags::Compute,
-				ResolveShader,
-				ResolveParams,
-				FIntVector(ResolveGroupsX, ResolveGroupsY, 1));
-		}
-
 		const TShaderMapRef<FGaussianCompositeCS> CompositeShader(GlobalShaderMap);
 		if (CompositeShader.IsValid())
 		{

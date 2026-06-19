@@ -221,6 +221,8 @@ public:
 		SHADER_PARAMETER(FMatrix44f, TranslatedWorldToClip)
 		SHADER_PARAMETER(FVector4f, ViewportRect)
 		SHADER_PARAMETER(FVector4f, ViewRect)
+		SHADER_PARAMETER(uint32, BatchStart)
+		SHADER_PARAMETER(uint32, BatchCount)
 		SHADER_PARAMETER(uint32, SortedCount)
 		SHADER_PARAMETER(uint32, GaussianCount)
 		SHADER_PARAMETER(float, SplatScale)
@@ -229,10 +231,7 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, SortedIndices)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, VisibleCountBuffer)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, GaussianSplatsVec4)
-		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, RWAccumAlpha)
-		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, RWAccumPremulR)
-		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, RWAccumPremulG)
-		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, RWAccumPremulB)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWOverlay)
 	END_SHADER_PARAMETER_STRUCT()
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);

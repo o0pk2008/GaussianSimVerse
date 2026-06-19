@@ -1,5 +1,5 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
-// GPU Gaussian rasterizer — atomic accumulation with saturated alpha.
+// GPU Gaussian rasterizer — back-to-front premultiplied alpha blend (batched by depth).
 
 #include "/Engine/Public/Platform.ush"
 #include "/Plugin/GaussianSimVerse/Private/GaussianCommon.ush"
@@ -9,62 +9,40 @@ float3 PreViewTranslation;
 float4x4 TranslatedWorldToClip;
 float4 ViewportRect;
 float4 ViewRect;
-StructuredBuffer<uint> SortedIndices;
-StructuredBuffer<uint> VisibleCountBuffer;
-StructuredBuffer<float4> GaussianSplatsVec4;
-RWTexture2D<uint> RWAccumAlpha;
-RWTexture2D<uint> RWAccumPremulR;
-RWTexture2D<uint> RWAccumPremulG;
-RWTexture2D<uint> RWAccumPremulB;
-
+uint BatchStart;
+uint BatchCount;
 uint SortedCount;
 uint GaussianCount;
 float SplatScale;
 uint MaxRasterRadius;
 uint bDebugOverlay;
 
-static const uint AccumFixedScale = 65535u;
-static const uint AccumFixedMax = 65535u;
+StructuredBuffer<uint> SortedIndices;
+StructuredBuffer<uint> VisibleCountBuffer;
+StructuredBuffer<float4> GaussianSplatsVec4;
+RWTexture2D<float4> RWOverlay;
 
-void AtomicAddSaturated(RWTexture2D<uint> Buffer, int2 Pixel, uint Value)
+void BlendPremul(int2 Pixel, float3 Color, float Alpha)
 {
-	[allow_uav_condition]
-	for (;;)
-	{
-		uint OldValue = Buffer[Pixel];
-		const uint NewValue = min(AccumFixedMax, OldValue + Value);
-		uint PrevValue;
-		InterlockedCompareExchange(Buffer[Pixel], OldValue, NewValue, PrevValue);
-		if (PrevValue == OldValue)
-		{
-			break;
-		}
-	}
-}
-
-void AtomicAccumulate(int2 Pixel, float3 Color, float Alpha)
-{
-	const uint AlphaFixed = (uint)(saturate(Alpha) * (float)AccumFixedScale);
-	if (AlphaFixed == 0u)
-	{
-		return;
-	}
-
-	const uint PremulR = (uint)(saturate(Color.r * Alpha) * (float)AccumFixedScale);
-	const uint PremulG = (uint)(saturate(Color.g * Alpha) * (float)AccumFixedScale);
-	const uint PremulB = (uint)(saturate(Color.b * Alpha) * (float)AccumFixedScale);
-
-	AtomicAddSaturated(RWAccumAlpha, Pixel, AlphaFixed);
-	AtomicAddSaturated(RWAccumPremulR, Pixel, PremulR);
-	AtomicAddSaturated(RWAccumPremulG, Pixel, PremulG);
-	AtomicAddSaturated(RWAccumPremulB, Pixel, PremulB);
+	float4 Dst = RWOverlay[Pixel];
+	const float3 SrcPremul = Color * Alpha;
+	const float OneMinusAlpha = 1.0 - Alpha;
+	const float3 OutPremul = SrcPremul + Dst.rgb * OneMinusAlpha;
+	const float OutAlpha = Alpha + Dst.a * OneMinusAlpha;
+	RWOverlay[Pixel] = float4(OutPremul, OutAlpha);
 }
 
 [numthreads(THREADGROUP_SIZE, 1, 1)]
 void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 {
-	const uint SortedIndex = DispatchThreadId.x;
+	const uint LocalIndex = DispatchThreadId.x;
+	if (LocalIndex >= BatchCount)
+	{
+		return;
+	}
+
 	const uint VisibleCount = min(SortedCount, VisibleCountBuffer[0]);
+	const uint SortedIndex = BatchStart + LocalIndex;
 	if (SortedIndex >= VisibleCount)
 	{
 		return;
@@ -130,7 +108,7 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 				}
 			}
 
-			AtomicAccumulate(int2(X, Y), Color, Alpha);
+			BlendPremul(int2(X, Y), Color, Alpha);
 		}
 	}
 }
