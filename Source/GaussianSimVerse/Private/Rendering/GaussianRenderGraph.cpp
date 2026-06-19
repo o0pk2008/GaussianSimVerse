@@ -328,9 +328,10 @@ void FGaussianRenderGraph::AddGPUDepthSortPasses(
 			FGaussianSortExtractCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FGaussianSortExtractCS::FParameters>();
 			PassParameters->MaxVisibleCount = MaxVisibleCount;
 			PassParameters->SortKeys = GraphBuilder.CreateSRV(SortKeysBuffer);
+			PassParameters->VisibleCountBuffer = CullResult.VisibleCountSRV;
 			PassParameters->RWSortedIndices = SortedIndicesUAV;
 
-			const uint32 NumGroups = FMath::DivideAndRoundUp(MaxVisibleCount, GaussianThreadGroupSize);
+			const uint32 NumGroups = FMath::DivideAndRoundUp(PaddedCount, GaussianThreadGroupSize);
 			FComputeShaderUtils::AddPass(
 				GraphBuilder,
 				RDG_EVENT_NAME("GaussianSimVerse::SortExtract S%u C%u", Binding.SceneId, Binding.ChunkIndex),

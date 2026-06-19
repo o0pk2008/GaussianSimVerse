@@ -94,6 +94,7 @@ public:
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER(uint32, MaxVisibleCount)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint2>, SortKeys)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, VisibleCountBuffer)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, RWSortedIndices)
 	END_SHADER_PARAMETER_STRUCT()
 

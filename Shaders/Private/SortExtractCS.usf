@@ -5,6 +5,7 @@
 #include "/Plugin/GaussianSimVerse/Private/GaussianCommon.ush"
 
 StructuredBuffer<uint2> SortKeys;
+StructuredBuffer<uint> VisibleCountBuffer;
 RWStructuredBuffer<uint> RWSortedIndices;
 
 uint MaxVisibleCount;
@@ -13,7 +14,8 @@ uint MaxVisibleCount;
 void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 {
 	const uint ElementIndex = DispatchThreadId.x;
-	if (ElementIndex >= MaxVisibleCount)
+	const uint VisibleCount = min(VisibleCountBuffer[0], MaxVisibleCount);
+	if (ElementIndex >= VisibleCount)
 	{
 		return;
 	}
