@@ -21,11 +21,6 @@
 #define GAUSSIAN_TILE_HOME_BIN_MAX_EXTENT 8.0
 #endif
 
-#ifndef GAUSSIAN_TILE_ROW_BLEND_MARGIN
-/** Pixels within this many rows of a tile top/bottom edge merge with the adjacent tile row. */
-#define GAUSSIAN_TILE_ROW_BLEND_MARGIN 2
-#endif
-
 /** Expand screen-space bounds used for tile binning to avoid seams at tile boundaries. */
 float2 GetSplatTileBinningExtent(float2 Extent)
 {
@@ -42,6 +37,39 @@ int2 GetSplatHomeTileCoord(float2 ScreenCenter, float4 ViewRect, uint NumTilesX,
 	HomeTile.x = clamp(HomeTile.x, 0, (int)NumTilesX - 1);
 	HomeTile.y = clamp(HomeTile.y, 0, (int)NumTilesY - 1);
 	return HomeTile;
+}
+
+void AddSplatToTileList(
+	int2 TileCoord,
+	uint NumTilesX,
+	uint NumTilesY,
+	uint SortedIndex,
+	uint SortKey,
+	StructuredBuffer<uint> TileOffsets,
+	RWStructuredBuffer<uint> RWTileFillCounters,
+	RWStructuredBuffer<uint2> RWTileSplats)
+{
+	if (TileCoord.x < 0 || TileCoord.y < 0
+		|| TileCoord.x >= (int)NumTilesX || TileCoord.y >= (int)NumTilesY)
+	{
+		return;
+	}
+
+	const uint TileId = (uint)TileCoord.y * NumTilesX + (uint)TileCoord.x;
+	const uint TileStart = TileOffsets[TileId];
+	const uint TileEnd = TileOffsets[TileId + 1u];
+	const uint TileCapacity = TileEnd - TileStart;
+	if (TileCapacity == 0u)
+	{
+		return;
+	}
+
+	uint LocalSlot;
+	InterlockedAdd(RWTileFillCounters[TileId], 1u, LocalSlot);
+	if (LocalSlot < TileCapacity)
+	{
+		RWTileSplats[TileStart + LocalSlot] = uint2(SortKey, SortedIndex);
+	}
 }
 
 /** Tile indices [TileMin, TileMax] inclusive for a screen-space splat footprint. */

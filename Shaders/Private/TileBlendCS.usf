@@ -102,82 +102,6 @@ bool BlendTileSplat(
 	return true;
 }
 
-void BlendSingleTileList(
-	uint TileId,
-	float2 PixelCenter,
-	inout float3 AccumRgb,
-	inout float Transmittance)
-{
-	const uint SplatStart = TileOffsets[TileId];
-	const uint SplatCount = min(TileCounts[TileId], MaxTileSplats);
-	if (SplatCount == 0u)
-	{
-		return;
-	}
-
-	const uint NumBatches = (SplatCount + GAUSSIAN_TILE_BLEND_BATCH - 1u) / GAUSSIAN_TILE_BLEND_BATCH;
-	for (uint Batch = 0u; Batch < NumBatches; ++Batch)
-	{
-		const uint BatchOffset = Batch * GAUSSIAN_TILE_BLEND_BATCH;
-		const uint BatchCount = min(GAUSSIAN_TILE_BLEND_BATCH, SplatCount - BatchOffset);
-
-		for (uint SplatSlot = 0u; SplatSlot < BatchCount; ++SplatSlot)
-		{
-			const uint2 Entry = TileSplats[SplatStart + BatchOffset + SplatSlot];
-			BlendTileSplat(PixelCenter, Entry.y, AccumRgb, Transmittance);
-			if (Transmittance < GaussianAlphaCutoff)
-			{
-				return;
-			}
-		}
-	}
-}
-
-void BlendTwoTileLists(
-	uint TileA,
-	uint TileB,
-	float2 PixelCenter,
-	inout float3 AccumRgb,
-	inout float Transmittance)
-{
-	const uint StartA = TileOffsets[TileA];
-	const uint StartB = TileOffsets[TileB];
-	const uint CountA = min(TileCounts[TileA], MaxTileSplats);
-	const uint CountB = min(TileCounts[TileB], MaxTileSplats);
-	uint IdxA = 0u;
-	uint IdxB = 0u;
-
-	while (IdxA < CountA && IdxB < CountB && Transmittance >= GaussianAlphaCutoff)
-	{
-		const uint2 EntryA = TileSplats[StartA + IdxA];
-		const uint2 EntryB = TileSplats[StartB + IdxB];
-		if (GaussianTileSplatLess(EntryA, EntryB))
-		{
-			BlendTileSplat(PixelCenter, EntryA.y, AccumRgb, Transmittance);
-			++IdxA;
-		}
-		else
-		{
-			BlendTileSplat(PixelCenter, EntryB.y, AccumRgb, Transmittance);
-			++IdxB;
-		}
-	}
-
-	while (IdxA < CountA && Transmittance >= GaussianAlphaCutoff)
-	{
-		const uint2 EntryA = TileSplats[StartA + IdxA];
-		BlendTileSplat(PixelCenter, EntryA.y, AccumRgb, Transmittance);
-		++IdxA;
-	}
-
-	while (IdxB < CountB && Transmittance >= GaussianAlphaCutoff)
-	{
-		const uint2 EntryB = TileSplats[StartB + IdxB];
-		BlendTileSplat(PixelCenter, EntryB.y, AccumRgb, Transmittance);
-		++IdxB;
-	}
-}
-
 [numthreads(GAUSSIAN_TILE_SIZE, GAUSSIAN_TILE_SIZE, 1)]
 void MainCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupThreadID)
 {
@@ -197,14 +121,9 @@ void MainCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupThreadID)
 	const float2 PixelCenter = float2(Pixel) + 0.5;
 
 	const uint TileId = TileY * NumTilesX + TileX;
+	const uint SplatStart = TileOffsets[TileId];
 	const uint SplatCount = min(TileCounts[TileId], MaxTileSplats);
-
-	const int2 LocalInTile = int2(GroupThreadId.xy);
-	const int RowMargin = GAUSSIAN_TILE_ROW_BLEND_MARGIN;
-	const bool bNearTopRow = LocalInTile.y < RowMargin && TileY > 0u;
-	const bool bNearBottomRow = LocalInTile.y >= int(GAUSSIAN_TILE_SIZE) - RowMargin && (TileY + 1u) < NumTilesY;
-
-	if (SplatCount == 0u && !bNearTopRow && !bNearBottomRow)
+	if (SplatCount == 0u)
 	{
 		return;
 	}
@@ -212,33 +131,26 @@ void MainCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupThreadID)
 	float3 AccumRgb = 0.0;
 	float Transmittance = 1.0;
 
-	if (bNearTopRow)
+	const uint NumBatches = (SplatCount + GAUSSIAN_TILE_BLEND_BATCH - 1u) / GAUSSIAN_TILE_BLEND_BATCH;
+	for (uint Batch = 0u; Batch < NumBatches; ++Batch)
 	{
-		const uint NeighborTileId = (TileY - 1u) * NumTilesX + TileX;
-		if (SplatCount > 0u)
+		const uint BatchOffset = Batch * GAUSSIAN_TILE_BLEND_BATCH;
+		const uint BatchCount = min(GAUSSIAN_TILE_BLEND_BATCH, SplatCount - BatchOffset);
+
+		for (uint SplatSlot = 0u; SplatSlot < BatchCount; ++SplatSlot)
 		{
-			BlendTwoTileLists(TileId, NeighborTileId, PixelCenter, AccumRgb, Transmittance);
+			const uint2 Entry = TileSplats[SplatStart + BatchOffset + SplatSlot];
+			BlendTileSplat(PixelCenter, Entry.y, AccumRgb, Transmittance);
+			if (Transmittance < GaussianAlphaCutoff)
+			{
+				break;
+			}
 		}
-		else
+
+		if (Transmittance < GaussianAlphaCutoff)
 		{
-			BlendSingleTileList(NeighborTileId, PixelCenter, AccumRgb, Transmittance);
+			break;
 		}
-	}
-	else if (bNearBottomRow)
-	{
-		const uint NeighborTileId = (TileY + 1u) * NumTilesX + TileX;
-		if (SplatCount > 0u)
-		{
-			BlendTwoTileLists(TileId, NeighborTileId, PixelCenter, AccumRgb, Transmittance);
-		}
-		else
-		{
-			BlendSingleTileList(NeighborTileId, PixelCenter, AccumRgb, Transmittance);
-		}
-	}
-	else
-	{
-		BlendSingleTileList(TileId, PixelCenter, AccumRgb, Transmittance);
 	}
 
 	const float Coverage = saturate(1.0 - Transmittance);
