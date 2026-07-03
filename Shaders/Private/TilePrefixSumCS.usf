@@ -9,6 +9,8 @@ RWStructuredBuffer<uint> RWTotalTileSplats;
 
 uint NumTiles;
 
+uint MaxTileSplats;
+
 [numthreads(1, 1, 1)]
 void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 {
@@ -16,7 +18,7 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 	for (uint TileId = 0u; TileId < NumTiles; ++TileId)
 	{
 		RWTileOffsets[TileId] = Offset;
-		Offset += TileCounts[TileId];
+		Offset += min(TileCounts[TileId], MaxTileSplats);
 	}
 	RWTileOffsets[NumTiles] = Offset;
 	RWTotalTileSplats[0] = Offset;

@@ -23,6 +23,8 @@ namespace GaussianSimVerse::RenderSettings
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarDebugRender;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarDebugOverlay;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarUseTileRaster;
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<float> CVarAdaptiveFarViewRatio;
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<float> CVarAdaptiveFarViewHysteresis;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarMaxSplatsPerTile;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<float> CVarAlphaCutoff;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<float> CVarAlphaCullThreshold;
@@ -77,14 +79,69 @@ namespace GaussianSimVerse::RenderSettings
 		return CVarDebugOverlay.GetValueOnAnyThread() != 0;
 	}
 
+	/** Shader per-tile splat storage cap (TileSortCS / TileBlendCS). */
+	constexpr int32 ShaderMaxSplatsPerTile = 16384;
+
+	FORCEINLINE int32 GetTileRasterMode()
+	{
+		return FMath::Clamp(CVarUseTileRaster.GetValueOnAnyThread(), 0, 2);
+	}
+
+	/** @deprecated Use GetTileRasterMode(); 1 = force tile, 0 = force global. */
 	FORCEINLINE bool UseTileRaster()
 	{
-		return CVarUseTileRaster.GetValueOnAnyThread() != 0;
+		return GetTileRasterMode() == 1;
 	}
 
 	FORCEINLINE int32 GetMaxSplatsPerTile()
 	{
-		return FMath::Clamp(CVarMaxSplatsPerTile.GetValueOnAnyThread(), 16, 8192);
+		return FMath::Clamp(CVarMaxSplatsPerTile.GetValueOnAnyThread(), 16, ShaderMaxSplatsPerTile);
+	}
+
+	/** Adaptive mode with hysteresis: tile close/medium, global only when clearly far (splats tiny). */
+	FORCEINLINE bool ShouldUseTileRasterPath(
+		int32 RasterMode,
+		bool bTileShadersValid,
+		uint32 EstimatedSplatsPerTile,
+		int32 MaxSplatsPerTile,
+		float ViewDistanceToScene,
+		float SceneBoundsRadius,
+		bool& bInOutLastUsedTilePath)
+	{
+		if (!bTileShadersValid)
+		{
+			return false;
+		}
+		if (RasterMode == 0)
+		{
+			return false;
+		}
+		if (RasterMode == 1)
+		{
+			return true;
+		}
+
+		(void)EstimatedSplatsPerTile;
+		(void)MaxSplatsPerTile;
+
+		const float SafeRadius = FMath::Max(SceneBoundsRadius, 1.0f);
+		const float DistanceToRadius = ViewDistanceToScene / SafeRadius;
+		const float FarViewRatio = FMath::Max(2.0f, CVarAdaptiveFarViewRatio.GetValueOnAnyThread());
+		const float Hysteresis = FMath::Max(0.0f, CVarAdaptiveFarViewHysteresis.GetValueOnAnyThread());
+
+		if (bInOutLastUsedTilePath)
+		{
+			if (DistanceToRadius > FarViewRatio + Hysteresis)
+			{
+				bInOutLastUsedTilePath = false;
+			}
+		}
+		else if (DistanceToRadius < FarViewRatio - Hysteresis)
+		{
+			bInOutLastUsedTilePath = true;
+		}
+
+		return bInOutLastUsedTilePath;
 	}
 
 	FORCEINLINE float GetAlphaCutoff()

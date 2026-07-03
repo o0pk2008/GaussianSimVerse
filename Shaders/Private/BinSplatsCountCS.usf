@@ -20,6 +20,10 @@ uint GaussianCount;
 uint NumTilesX;
 uint NumTilesY;
 float SplatScale;
+float GaussianAlphaCullThreshold;
+float GaussianCutoffK;
+float GaussianCovarianceDilation;
+float GaussianMinSigmaPixels;
 uint MaxRasterRadius;
 uint bDebugOverlay;
 
@@ -40,6 +44,10 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 	}
 
 	const FGaussianSplatGPU Splat = LoadGaussianSplat(GaussianSplatsVec4, GaussianIndex);
+	if (Splat.Opacity < GaussianAlphaCullThreshold)
+	{
+		return;
+	}
 
 	float2 ScreenCenter;
 	float3 InvConic;
@@ -55,9 +63,9 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 		ViewportRect,
 		ViewRect,
 		SplatScale,
-		7.0,
-		0.5,
-		0.35,
+		GaussianCutoffK,
+		GaussianCovarianceDilation,
+		GaussianMinSigmaPixels,
 		MaxRasterRadius,
 		ScreenCenter,
 		InvConic,
@@ -73,16 +81,10 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 		Extent = 8.0.xx;
 	}
 
-	const int2 ViewMin = int2(ViewRect.xy);
-	const int2 MinPixel = int2(floor(ScreenCenter - Extent));
-	const int2 MaxPixel = int2(ceil(ScreenCenter + Extent));
-
-	const int2 TileMin = int2(
-		max(0, (MinPixel.x - ViewMin.x) / GAUSSIAN_TILE_SIZE),
-		max(0, (MinPixel.y - ViewMin.y) / GAUSSIAN_TILE_SIZE));
-	const int2 TileMax = int2(
-		min((int)NumTilesX - 1, (MaxPixel.x - ViewMin.x) / GAUSSIAN_TILE_SIZE),
-		min((int)NumTilesY - 1, (MaxPixel.y - ViewMin.y) / GAUSSIAN_TILE_SIZE));
+	const float2 BinExtent = GetSplatTileBinningExtent(Extent);
+	int2 TileMin;
+	int2 TileMax;
+	GetSplatOverlappingTileRange(ScreenCenter, BinExtent, ViewRect, NumTilesX, NumTilesY, TileMin, TileMax);
 
 	for (int TileY = TileMin.y; TileY <= TileMax.y; ++TileY)
 	{

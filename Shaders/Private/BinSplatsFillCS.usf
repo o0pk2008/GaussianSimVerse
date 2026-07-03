@@ -85,37 +85,55 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 		Extent = 8.0.xx;
 	}
 
-	const int2 ViewMin = int2(ViewRect.xy);
-	const int2 MinPixel = int2(floor(ScreenCenter - Extent));
-	const int2 MaxPixel = int2(ceil(ScreenCenter + Extent));
+	const float2 BinExtent = GetSplatTileBinningExtent(Extent);
+	const float MaxBinExtent = max(BinExtent.x, BinExtent.y);
 
-	const int2 TileMin = int2(
-		max(0, (MinPixel.x - ViewMin.x) / GAUSSIAN_TILE_SIZE),
-		max(0, (MinPixel.y - ViewMin.y) / GAUSSIAN_TILE_SIZE));
-	const int2 TileMax = int2(
-		min((int)NumTilesX - 1, (MaxPixel.x - ViewMin.x) / GAUSSIAN_TILE_SIZE),
-		min((int)NumTilesY - 1, (MaxPixel.y - ViewMin.y) / GAUSSIAN_TILE_SIZE));
-
-	for (int TileY = TileMin.y; TileY <= TileMax.y; ++TileY)
+	if (MaxBinExtent < GAUSSIAN_TILE_HOME_BIN_MAX_EXTENT)
 	{
-		for (int TileX = TileMin.x; TileX <= TileMax.x; ++TileX)
+		const int2 HomeTile = GetSplatHomeTileCoord(ScreenCenter, ViewRect, NumTilesX, NumTilesY);
+		const uint TileId = (uint)HomeTile.y * NumTilesX + (uint)HomeTile.x;
+		const uint TileStart = TileOffsets[TileId];
+		const uint TileEnd = TileOffsets[TileId + 1u];
+		const uint TileCapacity = TileEnd - TileStart;
+		if (TileCapacity > 0u)
 		{
-			const uint TileId = (uint)TileY * NumTilesX + (uint)TileX;
-			const uint TileStart = TileOffsets[TileId];
-			const uint TileEnd = TileOffsets[TileId + 1u];
-			const uint TileCapacity = TileEnd - TileStart;
-			if (TileCapacity == 0u)
-			{
-				continue;
-			}
-
 			uint LocalSlot;
 			InterlockedAdd(RWTileFillCounters[TileId], 1u, LocalSlot);
 			if (LocalSlot < TileCapacity)
 			{
 				const float4 ClipPosition = LocalToClipPosition(Splat.Position, LocalToWorldMatrix, PreViewTranslation, TranslatedWorldToClip);
 				const uint SortKey = EncodeGaussianNearToFarKey(ClipPosition);
-				RWTileSplats[TileStart + LocalSlot] = uint2(SortKey, GaussianIndex);
+				RWTileSplats[TileStart + LocalSlot] = uint2(SortKey, SortedIndex);
+			}
+		}
+	}
+	else
+	{
+		int2 TileMin;
+		int2 TileMax;
+		GetSplatOverlappingTileRange(ScreenCenter, BinExtent, ViewRect, NumTilesX, NumTilesY, TileMin, TileMax);
+
+		for (int TileY = TileMin.y; TileY <= TileMax.y; ++TileY)
+		{
+			for (int TileX = TileMin.x; TileX <= TileMax.x; ++TileX)
+			{
+				const uint TileId = (uint)TileY * NumTilesX + (uint)TileX;
+				const uint TileStart = TileOffsets[TileId];
+				const uint TileEnd = TileOffsets[TileId + 1u];
+				const uint TileCapacity = TileEnd - TileStart;
+				if (TileCapacity == 0u)
+				{
+					continue;
+				}
+
+				uint LocalSlot;
+				InterlockedAdd(RWTileFillCounters[TileId], 1u, LocalSlot);
+				if (LocalSlot < TileCapacity)
+				{
+					const float4 ClipPosition = LocalToClipPosition(Splat.Position, LocalToWorldMatrix, PreViewTranslation, TranslatedWorldToClip);
+					const uint SortKey = EncodeGaussianNearToFarKey(ClipPosition);
+					RWTileSplats[TileStart + LocalSlot] = uint2(SortKey, SortedIndex);
+				}
 			}
 		}
 	}

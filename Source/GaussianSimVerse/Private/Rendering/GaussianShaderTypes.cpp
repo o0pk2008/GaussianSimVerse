@@ -28,6 +28,7 @@ IMPLEMENT_GAUSSIAN_CS(FGaussianResolveCS, "/Plugin/GaussianSimVerse/Private/Reso
 IMPLEMENT_GLOBAL_SHADER(FGaussianBinSplatsCountCS, "/Plugin/GaussianSimVerse/Private/BinSplatsCountCS.usf", "MainCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FGaussianBinSplatsFillCS, "/Plugin/GaussianSimVerse/Private/BinSplatsFillCS.usf", "MainCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FGaussianTilePrefixSumCS, "/Plugin/GaussianSimVerse/Private/TilePrefixSumCS.usf", "MainCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FGaussianTileSortCS, "/Plugin/GaussianSimVerse/Private/TileSortCS.usf", "MainCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FGaussianTileBlendCS, "/Plugin/GaussianSimVerse/Private/TileBlendCS.usf", "MainCS", SF_Compute);
 
 bool FGaussianBinSplatsCountCS::ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
@@ -40,6 +41,7 @@ void FGaussianBinSplatsCountCS::ModifyCompilationEnvironment(const FGlobalShader
 	FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
 	OutEnvironment.SetDefine(TEXT("THREADGROUP_SIZE"), GaussianThreadGroupSize);
 	OutEnvironment.SetDefine(TEXT("GAUSSIAN_TILE_SIZE"), 16);
+	OutEnvironment.SetDefine(TEXT("GAUSSIAN_MAX_SPLATS_PER_TILE"), 16384);
 	OutEnvironment.CompilerFlags.Add(CFLAG_StandardOptimization);
 }
 
@@ -53,6 +55,7 @@ void FGaussianBinSplatsFillCS::ModifyCompilationEnvironment(const FGlobalShaderP
 	FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
 	OutEnvironment.SetDefine(TEXT("THREADGROUP_SIZE"), GaussianThreadGroupSize);
 	OutEnvironment.SetDefine(TEXT("GAUSSIAN_TILE_SIZE"), 16);
+	OutEnvironment.SetDefine(TEXT("GAUSSIAN_MAX_SPLATS_PER_TILE"), 16384);
 	OutEnvironment.CompilerFlags.Add(CFLAG_StandardOptimization);
 }
 
@@ -67,6 +70,19 @@ void FGaussianTilePrefixSumCS::ModifyCompilationEnvironment(const FGlobalShaderP
 	OutEnvironment.CompilerFlags.Add(CFLAG_StandardOptimization);
 }
 
+bool FGaussianTileSortCS::ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+{
+	return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+}
+
+void FGaussianTileSortCS::ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+{
+	FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+	OutEnvironment.SetDefine(TEXT("GAUSSIAN_TILE_SIZE"), 16);
+	OutEnvironment.SetDefine(TEXT("GAUSSIAN_MAX_SPLATS_PER_TILE"), 16384);
+	OutEnvironment.CompilerFlags.Add(CFLAG_StandardOptimization);
+}
+
 bool FGaussianTileBlendCS::ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
 {
 	return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
@@ -76,6 +92,8 @@ void FGaussianTileBlendCS::ModifyCompilationEnvironment(const FGlobalShaderPermu
 {
 	FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
 	OutEnvironment.SetDefine(TEXT("GAUSSIAN_TILE_SIZE"), 16);
+	OutEnvironment.SetDefine(TEXT("GAUSSIAN_MAX_SPLATS_PER_TILE"), 16384);
+	OutEnvironment.SetDefine(TEXT("GAUSSIAN_TILE_BLEND_BATCH"), 1024);
 	OutEnvironment.CompilerFlags.Add(CFLAG_StandardOptimization);
 }
 

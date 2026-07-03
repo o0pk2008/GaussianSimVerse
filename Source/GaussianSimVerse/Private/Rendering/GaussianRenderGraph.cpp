@@ -369,20 +369,15 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 	}
 
 	const FGlobalShaderMap* GlobalShaderMap = GetGlobalShaderMap(GMaxRHIFeatureLevel);
-	const bool bUseTileRaster = GaussianSimVerse::RenderSettings::UseTileRaster();
+	const int32 TileRasterMode = GaussianSimVerse::RenderSettings::GetTileRasterMode();
 	const TShaderMapRef<FGaussianRasterCS> RasterShader(GlobalShaderMap);
 	const TShaderMapRef<FGaussianBinSplatsFillCS> BinFillShader(GlobalShaderMap);
+	const TShaderMapRef<FGaussianTileSortCS> TileSortShader(GlobalShaderMap);
 	const TShaderMapRef<FGaussianTileBlendCS> TileBlendShader(GlobalShaderMap);
-	if (bUseTileRaster)
+	const bool bTileShadersValid = BinFillShader.IsValid() && TileSortShader.IsValid() && TileBlendShader.IsValid();
+	if (!bTileShadersValid && !RasterShader.IsValid())
 	{
-		if (!BinFillShader.IsValid() || !TileBlendShader.IsValid())
-		{
-			UE_LOG(LogGaussianSimVerse, Warning, TEXT("GaussianSimVerse tile raster shaders are not compiled; falling back to legacy raster."));
-		}
-	}
-	if (!bUseTileRaster && !RasterShader.IsValid())
-	{
-		UE_LOG(LogGaussianSimVerse, Warning, TEXT("GaussianSimVerse raster shader is not compiled for this platform/feature level."));
+		UE_LOG(LogGaussianSimVerse, Warning, TEXT("GaussianSimVerse raster shaders are not compiled for this platform/feature level."));
 		return;
 	}
 
@@ -410,12 +405,17 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 			|| Inputs.ViewData.ViewRect.Height() != Inputs.SceneColorViewRect.Height()
 			|| Inputs.ViewData.ViewRect.Min != Inputs.SceneColorViewRect.Min))
 	{
-		UE_LOG(LogGaussianSimVerse, Log,
-			TEXT("GaussianSimVerse viewport/texture rect mismatch: viewport (%d,%d %dx%d) texture (%d,%d %dx%d)"),
-			Inputs.ViewData.ViewRect.Min.X, Inputs.ViewData.ViewRect.Min.Y,
-			Inputs.ViewData.ViewRect.Width(), Inputs.ViewData.ViewRect.Height(),
-			Inputs.SceneColorViewRect.Min.X, Inputs.SceneColorViewRect.Min.Y,
-			Inputs.SceneColorViewRect.Width(), Inputs.SceneColorViewRect.Height());
+		static bool bLoggedViewportTextureMismatchOnce = false;
+		if (!bLoggedViewportTextureMismatchOnce)
+		{
+			bLoggedViewportTextureMismatchOnce = true;
+			UE_LOG(LogGaussianSimVerse, Log,
+				TEXT("GaussianSimVerse viewport/texture rect mismatch (expected with screen %%): viewport (%d,%d %dx%d) texture (%d,%d %dx%d)"),
+				Inputs.ViewData.ViewRect.Min.X, Inputs.ViewData.ViewRect.Min.Y,
+				Inputs.ViewData.ViewRect.Width(), Inputs.ViewData.ViewRect.Height(),
+				Inputs.SceneColorViewRect.Min.X, Inputs.SceneColorViewRect.Min.Y,
+				Inputs.SceneColorViewRect.Width(), Inputs.SceneColorViewRect.Height());
+		}
 	}
 
 	const float GaussianAlphaCutoff = GaussianSimVerse::RenderSettings::GetAlphaCutoff();
@@ -440,6 +440,7 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 	const uint32 NumTiles = NumTilesX * NumTilesY;
 
 	const uint32 MaxSplatsPerTile = static_cast<uint32>(GaussianSimVerse::RenderSettings::GetMaxSplatsPerTile());
+
 	TArray<uint32> TileOffsetsCPU;
 	TileOffsetsCPU.SetNumUninitialized(static_cast<int32>(NumTiles + 1u));
 	for (uint32 TileId = 0; TileId <= NumTiles; ++TileId)
@@ -452,6 +453,49 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 		TEXT("Gaussian.TileOffsets"),
 		TileOffsetsCPU);
 	FRDGBufferSRVRef TileOffsetsSRV = GraphBuilder.CreateSRV(TileOffsetsBuffer);
+
+	float AdaptiveViewDistance = 0.0f;
+	float AdaptiveSceneBoundsRadius = 100.0f;
+	bool bHaveAdaptiveSceneMetrics = false;
+	if (TransientResources.CullResults.Num() > 0)
+	{
+		const FGaussianRDGCullResult& FirstCullResult = TransientResources.CullResults[0];
+		if (TransientResources.GPUBuffers.IsValidIndex(FirstCullResult.GPUBindingIndex))
+		{
+			const FGaussianRDGBufferBinding& FirstBinding = TransientResources.GPUBuffers[FirstCullResult.GPUBindingIndex];
+			for (const FGaussianSceneProxy& SceneProxy : Inputs.FrameResources.SceneProxies)
+			{
+				if (SceneProxy.SceneId == FirstBinding.SceneId)
+				{
+					AdaptiveViewDistance = static_cast<float>(FVector::Dist(
+						Inputs.ViewData.ViewOrigin,
+						FVector(SceneProxy.Bounds.Origin)));
+					AdaptiveSceneBoundsRadius = FVector(SceneProxy.Bounds.Extent).Size();
+					bHaveAdaptiveSceneMetrics = true;
+					break;
+				}
+			}
+		}
+	}
+
+	static TMap<uint32, bool> AdaptiveLastTilePathByView;
+	const uint32 ViewKey = (Inputs.View != nullptr)
+		? static_cast<uint32>(Inputs.View->GetViewKey())
+		: 0u;
+	bool& bAdaptiveLastTilePath = AdaptiveLastTilePathByView.FindOrAdd(ViewKey, true);
+
+	bool bAdaptiveUseTilePath = true;
+	if (TileRasterMode == 2 && bTileShadersValid && bHaveAdaptiveSceneMetrics)
+	{
+		bAdaptiveUseTilePath = GaussianSimVerse::RenderSettings::ShouldUseTileRasterPath(
+			TileRasterMode,
+			bTileShadersValid,
+			0u,
+			static_cast<int32>(MaxSplatsPerTile),
+			AdaptiveViewDistance,
+			AdaptiveSceneBoundsRadius,
+			bAdaptiveLastTilePath);
+	}
 
 	for (int32 CullIndex = 0; CullIndex < TransientResources.CullResults.Num(); ++CullIndex)
 	{
@@ -499,7 +543,62 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 		const float GaussianCutoffK = Binding.CutoffK;
 		const float GaussianCovarianceDilation = Binding.CovarianceDilation;
 
-		if (bUseTileRaster && BinFillShader.IsValid() && TileBlendShader.IsValid())
+		const uint32 EstimatedSplatsPerTile = NumTiles > 0
+			? (SortedCount + NumTiles - 1u) / NumTiles
+			: SortedCount;
+
+		float ViewDistanceToScene = 0.0f;
+		float SceneBoundsRadius = 100.0f;
+		for (const FGaussianSceneProxy& SceneProxy : Inputs.FrameResources.SceneProxies)
+		{
+			if (SceneProxy.SceneId == Binding.SceneId)
+			{
+				ViewDistanceToScene = static_cast<float>(FVector::Dist(
+					Inputs.ViewData.ViewOrigin,
+					FVector(SceneProxy.Bounds.Origin)));
+				SceneBoundsRadius = FVector(SceneProxy.Bounds.Extent).Size();
+				break;
+			}
+		}
+
+		bool bUseTilePath = false;
+		if (TileRasterMode == 2)
+		{
+			bUseTilePath = bAdaptiveUseTilePath;
+		}
+		else
+		{
+			bool bUnusedAdaptiveState = true;
+			bUseTilePath = GaussianSimVerse::RenderSettings::ShouldUseTileRasterPath(
+				TileRasterMode,
+				bTileShadersValid,
+				EstimatedSplatsPerTile,
+				static_cast<int32>(MaxSplatsPerTile),
+				ViewDistanceToScene,
+				SceneBoundsRadius,
+				bUnusedAdaptiveState);
+		}
+		if (!bUseTilePath && !RasterShader.IsValid() && bTileShadersValid)
+		{
+			bUseTilePath = true;
+		}
+
+		if (TileRasterMode == 2 && bTileShadersValid && RasterShader.IsValid()
+			&& GaussianSimVerse::RenderSettings::IsRenderDebugEnabled())
+		{
+			const float SafeRadius = FMath::Max(SceneBoundsRadius, 1.0f);
+			const float DistanceToRadius = ViewDistanceToScene / SafeRadius;
+			UE_LOG(LogGaussianSimVerse, Log,
+				TEXT("GaussianSimVerse raster S%u: %s (dist=%.0f radius=%.0f dist/radius=%.1f splats/tile~%u)"),
+				Binding.SceneId,
+				bUseTilePath ? TEXT("tile") : TEXT("global"),
+				ViewDistanceToScene,
+				SceneBoundsRadius,
+				DistanceToRadius,
+				EstimatedSplatsPerTile);
+		}
+
+		if (bUseTilePath)
 		{
 			FRDGBufferRef TileFillCounterBuffer = GraphBuilder.CreateBuffer(
 				FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), NumTiles),
@@ -551,6 +650,22 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 				FillParameters,
 				FIntVector(FillGroups, 1, 1));
 
+			FGaussianTileSortCS::FParameters* SortParameters = GraphBuilder.AllocParameters<FGaussianTileSortCS::FParameters>();
+			SortParameters->NumTilesX = NumTilesX;
+			SortParameters->NumTilesY = NumTilesY;
+			SortParameters->MaxTileSplats = MaxSplatsPerTile;
+			SortParameters->TileOffsets = TileOffsetsSRV;
+			SortParameters->TileCounts = TileFillCounterSRV;
+			SortParameters->RWTileSplats = TileSplatsUAV;
+
+			FComputeShaderUtils::AddPass(
+				GraphBuilder,
+				RDG_EVENT_NAME("GaussianSimVerse::TileSort S%u C%u", Binding.SceneId, Binding.ChunkIndex),
+				ERDGPassFlags::Compute,
+				TileSortShader,
+				SortParameters,
+				FIntVector(NumTilesX, NumTilesY, 1));
+
 			FGaussianTileBlendCS::FParameters* BlendParameters = GraphBuilder.AllocParameters<FGaussianTileBlendCS::FParameters>();
 			BlendParameters->LocalToWorldMatrix = FMatrix44f(Binding.LocalToWorld);
 			BlendParameters->PreViewTranslation = PreViewTranslation;
@@ -562,6 +677,7 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 			BlendParameters->NumTilesY = NumTilesY;
 			BlendParameters->NumTiles = NumTiles;
 			BlendParameters->GaussianCount = Binding.NumGaussians;
+			BlendParameters->MaxTileSplats = MaxSplatsPerTile;
 			BlendParameters->SplatScale = SplatScale;
 			BlendParameters->GaussianAlphaCutoff = GaussianAlphaCutoff;
 			BlendParameters->GaussianAlphaCullThreshold = GaussianAlphaCullThreshold;
@@ -573,6 +689,7 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 			BlendParameters->TileOffsets = TileOffsetsSRV;
 			BlendParameters->TileCounts = TileFillCounterSRV;
 			BlendParameters->TileSplats = TileSplatsSRV;
+			BlendParameters->SortedIndices = SortedIndicesSRV;
 			BlendParameters->GaussianSplatsVec4 = Binding.SplatSRV;
 			BlendParameters->RWOverlay = OverlayUAV;
 

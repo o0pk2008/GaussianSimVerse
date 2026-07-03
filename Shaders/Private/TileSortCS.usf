@@ -1,0 +1,51 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+// Per-tile stable bitonic sort in global memory (supports >4096 splats per tile).
+
+#include "/Engine/Public/Platform.ush"
+#include "/Plugin/GaussianSimVerse/Private/GaussianCommon.ush"
+
+StructuredBuffer<uint> TileOffsets;
+StructuredBuffer<uint> TileCounts;
+RWStructuredBuffer<uint2> RWTileSplats;
+
+uint NumTilesX;
+uint NumTilesY;
+uint MaxTileSplats;
+
+[numthreads(GAUSSIAN_TILE_SIZE, GAUSSIAN_TILE_SIZE, 1)]
+void MainCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupThreadID)
+{
+	const uint TileX = GroupId.x;
+	const uint TileY = GroupId.y;
+	if (TileX >= NumTilesX || TileY >= NumTilesY)
+	{
+		return;
+	}
+
+	const uint TileId = TileY * NumTilesX + TileX;
+	const uint SplatStart = TileOffsets[TileId];
+	const uint SplatCount = min(TileCounts[TileId], MaxTileSplats);
+	if (SplatCount <= 1u)
+	{
+		return;
+	}
+
+	const uint LocalThreadIndex = GroupThreadId.x + GroupThreadId.y * GAUSSIAN_TILE_SIZE;
+	const uint ThreadsPerGroup = GAUSSIAN_TILE_SIZE * GAUSSIAN_TILE_SIZE;
+
+	uint SortCountPow2 = 1u << (firstbithigh((int)(SplatCount - 1u)) + 1u);
+	SortCountPow2 = min(SortCountPow2, MaxTileSplats);
+
+	for (uint PadIndex = SplatCount + LocalThreadIndex; PadIndex < SortCountPow2; PadIndex += ThreadsPerGroup)
+	{
+		RWTileSplats[SplatStart + PadIndex] = uint2(0xFFFFFFFF, 0xFFFFFFFF);
+	}
+	GroupMemoryBarrierWithGroupSync();
+
+	BitonicSortTileSplatsGlobal(
+		RWTileSplats,
+		SplatStart,
+		SortCountPow2,
+		LocalThreadIndex,
+		ThreadsPerGroup);
+}

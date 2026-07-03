@@ -12,9 +12,117 @@
 #define GAUSSIAN_TILE_SIZE 16
 #endif
 
-#ifndef GAUSSIAN_MAX_SPLATS_PER_TILE
-#define GAUSSIAN_MAX_SPLATS_PER_TILE 4096
+#ifndef GAUSSIAN_TILE_BIN_PADDING_PIXELS
+#define GAUSSIAN_TILE_BIN_PADDING_PIXELS 2.0
 #endif
+
+#ifndef GAUSSIAN_TILE_HOME_BIN_MAX_EXTENT
+/** Splats smaller than this are binned to their center tile only (reduces far-field overflow). */
+#define GAUSSIAN_TILE_HOME_BIN_MAX_EXTENT 8.0
+#endif
+
+#ifndef GAUSSIAN_TILE_ROW_BLEND_MARGIN
+/** Pixels within this many rows of a tile top/bottom edge merge with the adjacent tile row. */
+#define GAUSSIAN_TILE_ROW_BLEND_MARGIN 2
+#endif
+
+/** Expand screen-space bounds used for tile binning to avoid seams at tile boundaries. */
+float2 GetSplatTileBinningExtent(float2 Extent)
+{
+	return Extent + GAUSSIAN_TILE_BIN_PADDING_PIXELS;
+}
+
+int2 GetSplatHomeTileCoord(float2 ScreenCenter, float4 ViewRect, uint NumTilesX, uint NumTilesY)
+{
+	const int2 ViewMin = int2(ViewRect.xy);
+	const int2 CenterPixel = int2(floor(ScreenCenter));
+	int2 HomeTile = int2(
+		(CenterPixel.x - ViewMin.x) / int(GAUSSIAN_TILE_SIZE),
+		(CenterPixel.y - ViewMin.y) / int(GAUSSIAN_TILE_SIZE));
+	HomeTile.x = clamp(HomeTile.x, 0, (int)NumTilesX - 1);
+	HomeTile.y = clamp(HomeTile.y, 0, (int)NumTilesY - 1);
+	return HomeTile;
+}
+
+/** Tile indices [TileMin, TileMax] inclusive for a screen-space splat footprint. */
+void GetSplatOverlappingTileRange(
+	float2 ScreenCenter,
+	float2 BinExtent,
+	float4 ViewRect,
+	uint NumTilesX,
+	uint NumTilesY,
+	out int2 TileMin,
+	out int2 TileMax)
+{
+	const int2 ViewMin = int2(ViewRect.xy);
+	const int2 MinPixel = int2(floor(ScreenCenter - BinExtent));
+	const int2 MaxPixel = int2(ceil(ScreenCenter + BinExtent));
+
+	TileMin = int2(
+		max(0, (MinPixel.x - ViewMin.x) / GAUSSIAN_TILE_SIZE),
+		max(0, (MinPixel.y - ViewMin.y) / GAUSSIAN_TILE_SIZE));
+	TileMax = int2(
+		min((int)NumTilesX - 1, (MaxPixel.x - ViewMin.x) / GAUSSIAN_TILE_SIZE),
+		min((int)NumTilesY - 1, (MaxPixel.y - ViewMin.y) / GAUSSIAN_TILE_SIZE));
+}
+
+/** Per-tile list entry: x = near-to-far depth key, y = global sorted index. */
+bool GaussianTileSplatLess(uint2 A, uint2 B)
+{
+	if (A.x != B.x)
+	{
+		return A.x < B.x;
+	}
+	return A.y < B.y;
+}
+
+bool GaussianTileSplatGreater(uint2 A, uint2 B)
+{
+	if (A.x != B.x)
+	{
+		return A.x > B.x;
+	}
+	return A.y > B.y;
+}
+
+#ifndef GAUSSIAN_MAX_SPLATS_PER_TILE
+#define GAUSSIAN_MAX_SPLATS_PER_TILE 16384
+#endif
+
+/** In-place bitonic sort for one tile's splat list in global memory. */
+void BitonicSortTileSplatsGlobal(
+	RWStructuredBuffer<uint2> RWTileSplats,
+	uint SplatStart,
+	uint SortCountPow2,
+	uint LocalThreadIndex,
+	uint ThreadsPerGroup)
+{
+	for (uint K = 2u; K <= SortCountPow2; K <<= 1u)
+	{
+		for (uint J = K >> 1u; J > 0u; J >>= 1u)
+		{
+			for (uint i = LocalThreadIndex; i < SortCountPow2; i += ThreadsPerGroup)
+			{
+				const uint IxJ = i ^ J;
+				if (IxJ > i)
+				{
+					const uint IdxA = SplatStart + i;
+					const uint IdxB = SplatStart + IxJ;
+					const uint2 A = RWTileSplats[IdxA];
+					const uint2 B = RWTileSplats[IdxB];
+					const bool bAscending = ((i & K) == 0u);
+					const bool bSwap = bAscending ? GaussianTileSplatGreater(A, B) : GaussianTileSplatLess(A, B);
+					if (bSwap)
+					{
+						RWTileSplats[IdxA] = B;
+						RWTileSplats[IdxB] = A;
+					}
+				}
+			}
+			GroupMemoryBarrierWithGroupSync();
+		}
+	}
+}
 
 struct FGaussianSplatGPU
 {
@@ -268,7 +376,9 @@ bool ProjectSplatEllipse(
 	{
 		const float MaxScale = max(Scales.x, max(Scales.y, Scales.z));
 		const float Depth = max(ClipPosition.w, 1e-2);
-		const float FocalPixels = abs(TranslatedWorldToClip[0][0]) * TextureRect.z * 0.5;
+		const float FocalViewport = abs(TranslatedWorldToClip[0][0]) * ViewportRect.z * 0.5;
+		const float ViewportToTextureScale = TextureRect.z / max(ViewportRect.z, 1.0);
+		const float FocalPixels = FocalViewport * ViewportToTextureScale;
 		const float Radius = clamp(MaxScale * FocalPixels / Depth * SplatScale, 1.0, (float)MaxRasterRadius);
 		AabbExtent = Radius.xx;
 		const float InvR2 = CutoffK / max(Radius * Radius, 1e-6);

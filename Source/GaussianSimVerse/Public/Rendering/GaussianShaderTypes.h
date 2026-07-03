@@ -121,6 +121,10 @@ public:
 		SHADER_PARAMETER(uint32, NumTilesX)
 		SHADER_PARAMETER(uint32, NumTilesY)
 		SHADER_PARAMETER(float, SplatScale)
+		SHADER_PARAMETER(float, GaussianAlphaCullThreshold)
+		SHADER_PARAMETER(float, GaussianCutoffK)
+		SHADER_PARAMETER(float, GaussianCovarianceDilation)
+		SHADER_PARAMETER(float, GaussianMinSigmaPixels)
 		SHADER_PARAMETER(uint32, MaxRasterRadius)
 		SHADER_PARAMETER(uint32, bDebugOverlay)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, SortedIndices)
@@ -141,6 +145,7 @@ public:
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER(uint32, NumTiles)
+		SHADER_PARAMETER(uint32, MaxTileSplats)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, TileCounts)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, RWTileOffsets)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, RWTotalTileSplats)
@@ -188,6 +193,25 @@ public:
 	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
 };
 
+class GAUSSIANSIMVERSE_API FGaussianTileSortCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FGaussianTileSortCS);
+	SHADER_USE_PARAMETER_STRUCT(FGaussianTileSortCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER(uint32, NumTilesX)
+		SHADER_PARAMETER(uint32, NumTilesY)
+		SHADER_PARAMETER(uint32, MaxTileSplats)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, TileOffsets)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, TileCounts)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint2>, RWTileSplats)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
+};
+
 class GAUSSIANSIMVERSE_API FGaussianTileBlendCS : public FGlobalShader
 {
 public:
@@ -205,6 +229,7 @@ public:
 		SHADER_PARAMETER(uint32, NumTilesY)
 		SHADER_PARAMETER(uint32, NumTiles)
 		SHADER_PARAMETER(uint32, GaussianCount)
+		SHADER_PARAMETER(uint32, MaxTileSplats)
 		SHADER_PARAMETER(float, SplatScale)
 		SHADER_PARAMETER(float, GaussianAlphaCutoff)
 		SHADER_PARAMETER(float, GaussianAlphaCullThreshold)
@@ -216,6 +241,7 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, TileOffsets)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, TileCounts)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint2>, TileSplats)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, SortedIndices)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, GaussianSplatsVec4)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWOverlay)
 	END_SHADER_PARAMETER_STRUCT()

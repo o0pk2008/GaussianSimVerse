@@ -115,17 +115,35 @@ namespace GaussianSimVerse::RenderSettings
 	TAutoConsoleVariable<int32> CVarUseTileRaster(
 		TEXT("r.GaussianSimVerse.UseTileRaster"),
 		1,
-		TEXT("Use tile-based rasterization (recommended: avoids per-splat write hazards).\n")
-		TEXT("0: Per-splat compute raster (legacy, can produce artifacts)\n")
-		TEXT("1: Tile-based blend (default)"),
+		TEXT("Rasterization strategy:\n")
+		TEXT("0: Always global per-splat raster (no tile seams; slow when close)\n")
+		TEXT("1: Tile raster + TileSort + multi-batch blend (default)\n")
+		TEXT("2: Adaptive — tile when close/medium, global when far"),
+		ECVF_RenderThreadSafe | ECVF_Scalability);
+
+	TAutoConsoleVariable<float> CVarAdaptiveFarViewRatio(
+		TEXT("r.GaussianSimVerse.AdaptiveFarViewRatio"),
+		52.0f,
+		TEXT("Adaptive mode (UseTileRaster=2): begin switching to global when\n")
+		TEXT("(camera distance / scene bounds radius) exceeds this value.\n")
+		TEXT("Default 52 keeps tile through medium distance (fast). Global only when far.\n")
+		TEXT("Lower values (e.g. 28) switch to global sooner — seam-free but very slow at medium range."),
+		ECVF_RenderThreadSafe | ECVF_Scalability);
+
+	TAutoConsoleVariable<float> CVarAdaptiveFarViewHysteresis(
+		TEXT("r.GaussianSimVerse.AdaptiveFarViewHysteresis"),
+		6.0f,
+		TEXT("Adaptive mode hysteresis band on dist/radius around AdaptiveFarViewRatio.\n")
+		TEXT("Reduces tile/global flicker and pop at the transition distance."),
 		ECVF_RenderThreadSafe | ECVF_Scalability);
 
 	TAutoConsoleVariable<int32> CVarMaxSplatsPerTile(
 		TEXT("r.GaussianSimVerse.MaxSplatsPerTile"),
-		4096,
-		TEXT("Maximum splats stored per screen tile when tile rasterization is enabled.\n")
-		TEXT("Higher values improve quality but cost GPU memory.\n")
-		TEXT("Valid range: 16..8192"),
+		8192,
+		TEXT("Maximum splats stored per 16x16 tile (tile raster).\n")
+		TEXT("TileSort + multi-batch TileBlend process the full list up to this cap.\n")
+		TEXT("Values above the cap are clamped. Lower values cause 16px tile dropout (blocks).\n")
+		TEXT("Valid range: 16..16384"),
 		ECVF_RenderThreadSafe | ECVF_Scalability);
 
 	TAutoConsoleVariable<float> CVarAlphaCutoff(
@@ -153,14 +171,14 @@ namespace GaussianSimVerse::RenderSettings
 		TEXT("r.GaussianSimVerse.CovarianceDilation"),
 		0.3f,
 		TEXT("Extra screen-space covariance added for anti-aliasing.\n")
-		TEXT("Higher values reduce distant prickly artifacts but can soften detail."),
+		TEXT("Higher values reduce distant tile-edge sparkles but can soften detail."),
 		ECVF_RenderThreadSafe | ECVF_Scalability);
 
 	TAutoConsoleVariable<float> CVarMinSigmaPixels(
 		TEXT("r.GaussianSimVerse.MinSigmaPixels"),
-		0.0f,
+		0.35f,
 		TEXT("Minimum Gaussian sigma in pixels after projection.\n")
-		TEXT("Raises stability for tiny splats and reduces sparkly edges."),
+		TEXT("Helps fill distant sub-pixel splats and reduces tile-boundary holes."),
 		ECVF_RenderThreadSafe | ECVF_Scalability);
 
 	TAutoConsoleVariable<int32> CVarUseResolvedSceneColor(
