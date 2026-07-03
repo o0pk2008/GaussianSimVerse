@@ -68,13 +68,13 @@ namespace GaussianSimVerse::RenderSettings
 
 	TAutoConsoleVariable<float> CVarSplatScale(
 		TEXT("r.GaussianSimVerse.SplatScale"),
-		6.0f,
+		1.5f,
 		TEXT("Screen-space scale factor for Gaussian splat footprints."),
 		ECVF_RenderThreadSafe | ECVF_Scalability);
 
 	TAutoConsoleVariable<int32> CVarMaxRasterRadius(
 		TEXT("r.GaussianSimVerse.MaxRasterRadius"),
-		64,
+		256,
 		TEXT("Maximum screen-space splat radius in pixels."),
 		ECVF_RenderThreadSafe | ECVF_Scalability);
 
@@ -111,6 +111,57 @@ namespace GaussianSimVerse::RenderSettings
 		TEXT("0: Off (default)\n")
 		TEXT("1: On"),
 		ECVF_RenderThreadSafe);
+
+	TAutoConsoleVariable<int32> CVarUseTileRaster(
+		TEXT("r.GaussianSimVerse.UseTileRaster"),
+		1,
+		TEXT("Use tile-based rasterization (recommended: avoids per-splat write hazards).\n")
+		TEXT("0: Per-splat compute raster (legacy, can produce artifacts)\n")
+		TEXT("1: Tile-based blend (default)"),
+		ECVF_RenderThreadSafe | ECVF_Scalability);
+
+	TAutoConsoleVariable<int32> CVarMaxSplatsPerTile(
+		TEXT("r.GaussianSimVerse.MaxSplatsPerTile"),
+		4096,
+		TEXT("Maximum splats stored per screen tile when tile rasterization is enabled.\n")
+		TEXT("Higher values improve quality but cost GPU memory.\n")
+		TEXT("Valid range: 16..8192"),
+		ECVF_RenderThreadSafe | ECVF_Scalability);
+
+	TAutoConsoleVariable<float> CVarAlphaCutoff(
+		TEXT("r.GaussianSimVerse.AlphaCutoff"),
+		1.0f / 255.0f,
+		TEXT("Minimum per-pixel alpha contribution kept during Gaussian blending.\n")
+		TEXT("Lower values keep more tail energy but can increase halos/noise."),
+		ECVF_RenderThreadSafe | ECVF_Scalability);
+
+	TAutoConsoleVariable<float> CVarAlphaCullThreshold(
+		TEXT("r.GaussianSimVerse.AlphaCullThreshold"),
+		2.0f / 255.0f,
+		TEXT("Cull entire splats whose base opacity is below this threshold before rasterization.\n")
+		TEXT("Helps remove fuzzy low-density outliers around the model silhouette."),
+		ECVF_RenderThreadSafe | ECVF_Scalability);
+
+	TAutoConsoleVariable<float> CVarCutoffK(
+		TEXT("r.GaussianSimVerse.CutoffK"),
+		7.0f,
+		TEXT("Ellipse cutoff in conic space.\n")
+		TEXT("Lower values tighten splat tails and reduce halos; higher values fill more aggressively."),
+		ECVF_RenderThreadSafe | ECVF_Scalability);
+
+	TAutoConsoleVariable<float> CVarCovarianceDilation(
+		TEXT("r.GaussianSimVerse.CovarianceDilation"),
+		0.3f,
+		TEXT("Extra screen-space covariance added for anti-aliasing.\n")
+		TEXT("Higher values reduce distant prickly artifacts but can soften detail."),
+		ECVF_RenderThreadSafe | ECVF_Scalability);
+
+	TAutoConsoleVariable<float> CVarMinSigmaPixels(
+		TEXT("r.GaussianSimVerse.MinSigmaPixels"),
+		0.0f,
+		TEXT("Minimum Gaussian sigma in pixels after projection.\n")
+		TEXT("Raises stability for tiny splats and reduces sparkly edges."),
+		ECVF_RenderThreadSafe | ECVF_Scalability);
 
 	TAutoConsoleVariable<int32> CVarUseResolvedSceneColor(
 		TEXT("r.GaussianSimVerse.UseResolvedSceneColor"),

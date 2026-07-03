@@ -57,7 +57,6 @@ bool GaussianRasterVisible(float4 ClipPosition)
 }
 
 static const uint GaussianSplatFloat4Stride = 4u;
-
 FGaussianSplatGPU LoadGaussianSplat(StructuredBuffer<float4> GaussianSplatsVec4, uint Index)
 {
 	const uint Base = Index * GaussianSplatFloat4Stride;
@@ -93,7 +92,7 @@ float3x3 QuatToMat3(float4 Q)
 float3 LocalDirectionToView(float3 LocalDirection, float4x4 LocalToWorldMatrix, float4x4 TranslatedViewMatrix)
 {
 	const float3 WorldDirection = mul(float4(LocalDirection, 0.0), LocalToWorldMatrix).xyz;
-	return mul((float3x3)TranslatedViewMatrix, WorldDirection);
+	return mul(float4(WorldDirection, 0.0), TranslatedViewMatrix).xyz;
 }
 
 float3 LocalToViewPosition(float3 LocalPosition, float4x4 LocalToWorldMatrix, float3 PreViewTranslation, float4x4 TranslatedViewMatrix)
@@ -136,6 +135,23 @@ float2 ClipToScreen(float4 ClipPosition, float4 ViewRect)
 	return ClipToScreen(ClipPosition, ViewRect, ViewRect);
 }
 
+float ComputeGaussianDepth01(float4 ClipPosition)
+{
+	const float SafeW = max(ClipPosition.w, 1e-6);
+	const float NdcDepth = saturate(ClipPosition.z / SafeW);
+	return 1.0 - NdcDepth;
+}
+
+uint EncodeGaussianNearToFarKey(float4 ClipPosition)
+{
+	return asuint(ComputeGaussianDepth01(ClipPosition));
+}
+
+uint EncodeGaussianFarToNearKey(float4 ClipPosition)
+{
+	return asuint(1.0 - ComputeGaussianDepth01(ClipPosition));
+}
+
 float ComputeScreenRadius(
 	FGaussianSplatGPU Splat,
 	float3 ViewPosition,
@@ -162,6 +178,158 @@ float ComputeScreenRadius(
 	const float FocalPixels = abs(TranslatedWorldToClip[0][0]) * ViewRect.z * 0.5;
 	const float Radius = sqrt(max(ExtentSq, 1e-8)) * FocalPixels / Depth * SplatScale;
 	return clamp(Radius, 1.0, (float)MaxRasterRadius);
+}
+
+float3x3 ComputeSplatCovariance_View(
+	FGaussianSplatGPU Splat,
+	float4x4 LocalToWorldMatrix,
+	float4x4 TranslatedViewMatrix)
+{
+	const float3x3 Rot = QuatToMat3(Splat.Rotation);
+	const float3 Scales = max(Splat.Scale, float3(1e-6, 1e-6, 1e-6));
+
+	const float3 Axis0 = LocalDirectionToView(mul(Rot, float3(Scales.x, 0.0, 0.0)), LocalToWorldMatrix, TranslatedViewMatrix);
+	const float3 Axis1 = LocalDirectionToView(mul(Rot, float3(0.0, Scales.y, 0.0)), LocalToWorldMatrix, TranslatedViewMatrix);
+	const float3 Axis2 = LocalDirectionToView(mul(Rot, float3(0.0, 0.0, Scales.z)), LocalToWorldMatrix, TranslatedViewMatrix);
+
+	const float Sxx = Axis0.x * Axis0.x + Axis1.x * Axis1.x + Axis2.x * Axis2.x;
+	const float Sxy = Axis0.x * Axis0.y + Axis1.x * Axis1.y + Axis2.x * Axis2.y;
+	const float Sxz = Axis0.x * Axis0.z + Axis1.x * Axis1.z + Axis2.x * Axis2.z;
+	const float Syy = Axis0.y * Axis0.y + Axis1.y * Axis1.y + Axis2.y * Axis2.y;
+	const float Syz = Axis0.y * Axis0.z + Axis1.y * Axis1.z + Axis2.y * Axis2.z;
+	const float Szz = Axis0.z * Axis0.z + Axis1.z * Axis1.z + Axis2.z * Axis2.z;
+
+	return float3x3(
+		Sxx, Sxy, Sxz,
+		Sxy, Syy, Syz,
+		Sxz, Syz, Szz);
+}
+
+bool ProjectSplatEllipse(
+	FGaussianSplatGPU Splat,
+	float4x4 LocalToWorldMatrix,
+	float3 PreViewTranslation,
+	float4x4 TranslatedViewMatrix,
+	float4x4 TranslatedWorldToClip,
+	float4 ViewportRect,
+	float4 TextureRect,
+	float SplatScale,
+	float CutoffK,
+	float CovarianceDilation,
+	float MinSigmaPixels,
+	uint MaxRasterRadius,
+	out float2 ScreenCenter,
+	out float3 InvConic,
+	out float2 AabbExtent,
+	out float3 ViewPosition,
+	out float EffectiveOpacity)
+{
+	const float4 ClipPosition = LocalToClipPosition(Splat.Position, LocalToWorldMatrix, PreViewTranslation, TranslatedWorldToClip);
+	if (!GaussianRasterVisible(ClipPosition))
+	{
+		return false;
+	}
+
+	ScreenCenter = ClipToScreen(ClipPosition, ViewportRect, TextureRect);
+	ViewPosition = LocalToViewPosition(Splat.Position, LocalToWorldMatrix, PreViewTranslation, TranslatedViewMatrix);
+	EffectiveOpacity = Splat.Opacity;
+
+	const float3x3 Rot = QuatToMat3(Splat.Rotation);
+	const float3 Scales = max(Splat.Scale, float3(1e-6, 1e-6, 1e-6));
+
+	const float3 AxisLocal0 = mul(Rot, float3(Scales.x, 0.0, 0.0));
+	const float3 AxisLocal1 = mul(Rot, float3(0.0, Scales.y, 0.0));
+	const float3 AxisLocal2 = mul(Rot, float3(0.0, 0.0, Scales.z));
+
+	const float4 Clip0 = LocalToClipPosition(Splat.Position + AxisLocal0, LocalToWorldMatrix, PreViewTranslation, TranslatedWorldToClip);
+	const float4 Clip1 = LocalToClipPosition(Splat.Position + AxisLocal1, LocalToWorldMatrix, PreViewTranslation, TranslatedWorldToClip);
+	const float4 Clip2 = LocalToClipPosition(Splat.Position + AxisLocal2, LocalToWorldMatrix, PreViewTranslation, TranslatedWorldToClip);
+	const bool bEndpointsValid = GaussianRasterVisible(Clip0) && GaussianRasterVisible(Clip1) && GaussianRasterVisible(Clip2);
+
+	float2 Dx0 = 0.0;
+	float2 Dx1 = 0.0;
+	float2 Dx2 = 0.0;
+	if (bEndpointsValid)
+	{
+		const float2 Screen0 = ClipToScreen(Clip0, ViewportRect, TextureRect);
+		const float2 Screen1 = ClipToScreen(Clip1, ViewportRect, TextureRect);
+		const float2 Screen2 = ClipToScreen(Clip2, ViewportRect, TextureRect);
+
+		Dx0 = (Screen0 - ScreenCenter) * SplatScale;
+		Dx1 = (Screen1 - ScreenCenter) * SplatScale;
+		Dx2 = (Screen2 - ScreenCenter) * SplatScale;
+	}
+
+	float Sxx = Dx0.x * Dx0.x + Dx1.x * Dx1.x + Dx2.x * Dx2.x;
+	float Sxy = Dx0.x * Dx0.y + Dx1.x * Dx1.y + Dx2.x * Dx2.y;
+	float Syy = Dx0.y * Dx0.y + Dx1.y * Dx1.y + Dx2.y * Dx2.y;
+
+	if (!bEndpointsValid || (Sxx + Syy) < 1e-6)
+	{
+		const float MaxScale = max(Scales.x, max(Scales.y, Scales.z));
+		const float Depth = max(ClipPosition.w, 1e-2);
+		const float FocalPixels = abs(TranslatedWorldToClip[0][0]) * TextureRect.z * 0.5;
+		const float Radius = clamp(MaxScale * FocalPixels / Depth * SplatScale, 1.0, (float)MaxRasterRadius);
+		AabbExtent = Radius.xx;
+		const float InvR2 = CutoffK / max(Radius * Radius, 1e-6);
+		InvConic = float3(InvR2, 0.0, InvR2);
+		return true;
+	}
+
+	Sxx = max(Sxx, 1e-6);
+	Syy = max(Syy, 1e-6);
+
+	const float OriginalDet = max(Sxx * Syy - Sxy * Sxy, 1e-12);
+	const float MinVar = MinSigmaPixels * MinSigmaPixels;
+	Sxx += CovarianceDilation + MinVar;
+	Syy += CovarianceDilation + MinVar;
+
+	const float Det = max(Sxx * Syy - Sxy * Sxy, 1e-12);
+	const float InvDet = rcp(Det);
+	InvConic = float3(Syy * InvDet, -Sxy * InvDet, Sxx * InvDet);
+	EffectiveOpacity *= sqrt(saturate(OriginalDet / Det));
+
+	const float Trace = Sxx + Syy;
+	const float Delta = sqrt(max(0.0, (Trace * Trace) * 0.25 - Det));
+	const float Lambda0 = max(Trace * 0.5 + Delta, 1e-6);
+	const float Lambda1 = max(Trace * 0.5 - Delta, 1e-6);
+
+	const float Angle = 0.5 * atan2(2.0 * Sxy, Sxx - Syy);
+	const float C = cos(Angle);
+	const float S = sin(Angle);
+
+	const float Major = sqrt(Lambda0 * CutoffK);
+	const float Minor = sqrt(Lambda1 * CutoffK);
+
+	AabbExtent = float2(abs(C) * Major + abs(S) * Minor, abs(S) * Major + abs(C) * Minor);
+	const float2 UnclampedAabbExtent = AabbExtent;
+	AabbExtent = clamp(AabbExtent, 1.0.xx, (float)MaxRasterRadius.xx);
+	if (any(AabbExtent < UnclampedAabbExtent))
+	{
+		const float2 ExtentScale = UnclampedAabbExtent / max(AabbExtent, 1e-3.xx);
+		const float ConicScale = max(ExtentScale.x, ExtentScale.y);
+		InvConic *= (ConicScale * ConicScale);
+	}
+
+	return true;
+}
+
+float EvaluateSplatAlphaEllipse(float2 Pixel, float2 ScreenCenter, float3 InvConic, float Opacity, float CutoffK, uint bDebugOverlay)
+{
+	const float2 Delta = Pixel - ScreenCenter;
+	const float Quad = InvConic.x * Delta.x * Delta.x + 2.0 * InvConic.y * Delta.x * Delta.y + InvConic.z * Delta.y * Delta.y;
+	if (Quad > CutoffK)
+	{
+		return 0.0;
+	}
+
+	if (bDebugOverlay != 0u)
+	{
+		return 1.0;
+	}
+
+	const float Gaussian = exp(-0.5 * Quad);
+	return saturate(Opacity * Gaussian);
 }
 
 bool ProjectSplatDisc(

@@ -17,6 +17,10 @@ FGaussianSceneProxy::FGaussianSceneProxy(const UGaussianScene* InScene)
 	Bounds = InScene->GetCombinedBounds();
 	TotalGaussianCount = InScene->GetTotalGaussianCount();
 	bEnableRendering = InScene->bEnableRendering;
+	SplatScale = InScene->SplatScale;
+	AlphaCullThreshold = InScene->AlphaCullThreshold;
+	CutoffK = InScene->CutoffK;
+	CovarianceDilation = InScene->CovarianceDilation;
 
 	Chunks.Reserve(InScene->Chunks.Num());
 	uint32 ChunkIndex = 0;

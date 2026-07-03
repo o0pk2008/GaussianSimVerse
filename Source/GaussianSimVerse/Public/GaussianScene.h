@@ -32,6 +32,18 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Gaussian")
 	bool bEnableRendering = true;
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Gaussian|Rendering")
+	float SplatScale = 1.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Gaussian|Rendering")
+	float AlphaCullThreshold = 0.007843137f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Gaussian|Rendering")
+	float CutoffK = 7.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Gaussian|Rendering")
+	float CovarianceDilation = 0.3f;
+
 	uint32 GetTotalGaussianCount() const;
 	FGaussianBounds GetCombinedBounds() const;
 	bool IsRegisteredWithRenderer() const { return bRegisteredWithRenderer; }

@@ -31,8 +31,8 @@ namespace GaussianImport
 
 	FVector3f MetersToUEScale(const FVector3f& Scale)
 	{
-		// Permute scale axes to match PlayCanvasToUEPosition.
-		return FVector3f(Scale.X, Scale.Z, Scale.Y) * MetersToCentimeters;
+		// PlayCanvas / SOG: rotation is converted via PlayCanvasToUERotation; only convert units.
+		return Scale * MetersToCentimeters;
 	}
 
 	FVector4f PlayCanvasToUERotation(float W, float X, float Y, float Z)
@@ -48,12 +48,42 @@ namespace GaussianImport
 
 	FVector3f PlyToUEPosition(const FVector3f& Position)
 	{
-		return PlayCanvasToUEPosition(Position);
+		// Standard 3DGS PLY exports typically follow a COLMAP-like basis.
+		// Map source (x, y, z) -> UE (forward, right, up) as (z, x, -y).
+		return FVector3f(Position.Z, Position.X, -Position.Y) * MetersToCentimeters;
+	}
+
+	FVector3f PlyToUEDirection(const FVector3f& Direction)
+	{
+		return FVector3f(Direction.Z, Direction.X, -Direction.Y);
+	}
+
+	namespace GaussianImportPrivate
+	{
+		// Right-handed basis for PLY RDF -> UE (X forward, Y right, Z up).
+		// Maps COLMAP +X -> UE +Y, +Y -> UE -Z, +Z -> UE +X.
+		const FQuat PlyBasisToUeQuat = []() -> FQuat
+		{
+			FVector XAxis(0.0, 1.0, 0.0);
+			FVector YAxis(0.0, 0.0, -1.0);
+			FVector ZAxis(-1.0, 0.0, 0.0);
+			FMatrix Basis = FMatrix::Identity;
+			Basis.SetAxes(&XAxis, &YAxis, &ZAxis, nullptr);
+			return FQuat(Basis);
+		}();
 	}
 
 	FVector4f PlyToUERotation(float W, float X, float Y, float Z)
 	{
-		return PlayCanvasToUERotation(W, X, Y, Z);
+		const FQuat PlyQuat(X, Y, Z, W);
+		const FQuat UeQuat = (GaussianImportPrivate::PlyBasisToUeQuat * PlyQuat).GetNormalized();
+		return FVector4f(UeQuat.X, UeQuat.Y, UeQuat.Z, UeQuat.W);
+	}
+
+	FVector3f PlyMetersToUEScale(const FVector3f& Scale)
+	{
+		// Rotation already maps PLY principal axes into UE space; only convert units.
+		return Scale * MetersToCentimeters;
 	}
 
 	FVector4f SH0ToLinearColor(float Fdc0, float Fdc1, float Fdc2, float Opacity)

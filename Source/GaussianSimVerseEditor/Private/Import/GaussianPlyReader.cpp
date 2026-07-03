@@ -209,7 +209,7 @@ namespace GaussianPlyPrivate
 
 			FGaussianSplatData Splat;
 			Splat.Position = GaussianImport::PlyToUEPosition(RawPos);
-			Splat.Scale = GaussianImport::MetersToUEScale(FVector3f(
+			Splat.Scale = GaussianImport::PlyMetersToUEScale(FVector3f(
 				FMath::Max(Chunk.MinScaleX + Sx * (Chunk.MaxScaleX - Chunk.MinScaleX), KINDA_SMALL_NUMBER),
 				FMath::Max(Chunk.MinScaleY + Sy * (Chunk.MaxScaleY - Chunk.MinScaleY), KINDA_SMALL_NUMBER),
 				FMath::Max(Chunk.MinScaleZ + Sz * (Chunk.MaxScaleZ - Chunk.MinScaleZ), KINDA_SMALL_NUMBER)));
@@ -420,6 +420,39 @@ bool FGaussianPlyReader::ReadFile(const FString& FilePath, TArray<FGaussianSplat
 	const int32 IdxRot2 = GaussianPlyPrivate::FindPropertyIndex(VertexProperties, TEXT("rot_2"));
 	const int32 IdxRot3 = GaussianPlyPrivate::FindPropertyIndex(VertexProperties, TEXT("rot_3"));
 
+	const bool bHasSH0Color = IdxFdc0 != INDEX_NONE && IdxFdc1 != INDEX_NONE && IdxFdc2 != INDEX_NONE;
+	const bool bHasRGBColor = IdxRed != INDEX_NONE && IdxGreen != INDEX_NONE && IdxBlue != INDEX_NONE;
+	const bool bHasOpacity = IdxOpacity != INDEX_NONE;
+	const bool bHasScale = IdxScale0 != INDEX_NONE && IdxScale1 != INDEX_NONE && IdxScale2 != INDEX_NONE;
+	const bool bHasRotation = IdxRot0 != INDEX_NONE && IdxRot1 != INDEX_NONE && IdxRot2 != INDEX_NONE && IdxRot3 != INDEX_NONE;
+
+	if (!bHasOpacity || !bHasScale || !bHasRotation || (!bHasSH0Color && !bHasRGBColor))
+	{
+		TArray<FString> Missing;
+		if (!bHasOpacity)
+		{
+			Missing.Add(TEXT("opacity"));
+		}
+		if (!bHasScale)
+		{
+			Missing.Add(TEXT("scale_0/1/2"));
+		}
+		if (!bHasRotation)
+		{
+			Missing.Add(TEXT("rot_0/1/2/3"));
+		}
+		if (!bHasSH0Color && !bHasRGBColor)
+		{
+			Missing.Add(TEXT("f_dc_0/1/2 or red/green/blue"));
+		}
+
+		OutError = FString::Printf(
+			TEXT("PLY is not a valid 3D Gaussian asset. Missing required properties: %s. ")
+			TEXT("If this is COLMAP/SfM `input.ply` or a generic point cloud, it cannot be rendered as 3DGS."),
+			*FString::Join(Missing, TEXT(", ")));
+		return false;
+	}
+
 	OutSplats.Reset();
 	OutSplats.Reserve(VertexCount);
 
@@ -506,7 +539,7 @@ bool FGaussianPlyReader::ReadFile(const FString& FilePath, TArray<FGaussianSplat
 
 			FGaussianSplatData Splat;
 			Splat.Position = GaussianImport::PlyToUEPosition(RawPos);
-			Splat.Scale = GaussianImport::MetersToUEScale(FVector3f(ScaleX, ScaleY, ScaleZ));
+			Splat.Scale = GaussianImport::PlyMetersToUEScale(FVector3f(ScaleX, ScaleY, ScaleZ));
 			Splat.Rotation = GaussianImport::PlyToUERotation(RotW, RotX, RotY, RotZ);
 			Splat.Color = FVector4f(R, G, B, A);
 			OutSplats.Add(Splat);
@@ -590,7 +623,7 @@ bool FGaussianPlyReader::ReadFile(const FString& FilePath, TArray<FGaussianSplat
 
 			FGaussianSplatData Splat;
 			Splat.Position = GaussianImport::PlyToUEPosition(RawPos);
-			Splat.Scale = GaussianImport::MetersToUEScale(FVector3f(ScaleX, ScaleY, ScaleZ));
+			Splat.Scale = GaussianImport::PlyMetersToUEScale(FVector3f(ScaleX, ScaleY, ScaleZ));
 			Splat.Rotation = GaussianImport::PlyToUERotation(RotW, RotX, RotY, RotZ);
 			Splat.Color = FVector4f(R, G, B, A);
 			OutSplats.Add(Splat);

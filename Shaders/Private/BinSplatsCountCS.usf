@@ -8,6 +8,7 @@ float4x4 LocalToWorldMatrix;
 float3 PreViewTranslation;
 float4x4 TranslatedViewMatrix;
 float4x4 TranslatedWorldToClip;
+float4 ViewportRect;
 float4 ViewRect;
 StructuredBuffer<uint> SortedIndices;
 StructuredBuffer<uint> VisibleCountBuffer;
@@ -41,32 +42,40 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 	const FGaussianSplatGPU Splat = LoadGaussianSplat(GaussianSplatsVec4, GaussianIndex);
 
 	float2 ScreenCenter;
-	float ScreenRadius;
+	float3 InvConic;
+	float2 Extent;
 	float3 ViewPosition;
-	if (!ProjectSplatDisc(
+	float EffectiveOpacity;
+	if (!ProjectSplatEllipse(
 		Splat,
 		LocalToWorldMatrix,
 		PreViewTranslation,
 		TranslatedViewMatrix,
 		TranslatedWorldToClip,
+		ViewportRect,
 		ViewRect,
 		SplatScale,
+		7.0,
+		0.5,
+		0.35,
 		MaxRasterRadius,
 		ScreenCenter,
-		ScreenRadius,
-		ViewPosition))
+		InvConic,
+		Extent,
+		ViewPosition,
+		EffectiveOpacity))
 	{
 		return;
 	}
 
 	if (bDebugOverlay != 0u)
 	{
-		ScreenRadius = 8.0;
+		Extent = 8.0.xx;
 	}
 
 	const int2 ViewMin = int2(ViewRect.xy);
-	const int2 MinPixel = int2(floor(ScreenCenter - ScreenRadius));
-	const int2 MaxPixel = int2(ceil(ScreenCenter + ScreenRadius));
+	const int2 MinPixel = int2(floor(ScreenCenter - Extent));
+	const int2 MaxPixel = int2(ceil(ScreenCenter + Extent));
 
 	const int2 TileMin = int2(
 		max(0, (MinPixel.x - ViewMin.x) / GAUSSIAN_TILE_SIZE),

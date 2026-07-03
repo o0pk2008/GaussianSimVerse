@@ -76,7 +76,7 @@ bool FGaussianSplatReader::ReadFile(const FString& FilePath, TArray<FGaussianSpl
 		FGaussianSplatData Splat;
 		const FVector3f RawPos(Record.Position[0], Record.Position[1], Record.Position[2]);
 		Splat.Position = GaussianImport::PlyToUEPosition(RawPos);
-		Splat.Scale = GaussianImport::MetersToUEScale(FVector3f(
+		Splat.Scale = GaussianImport::PlyMetersToUEScale(FVector3f(
 			FMath::Max(Record.Scale[0], KINDA_SMALL_NUMBER),
 			FMath::Max(Record.Scale[1], KINDA_SMALL_NUMBER),
 			FMath::Max(Record.Scale[2], KINDA_SMALL_NUMBER)));

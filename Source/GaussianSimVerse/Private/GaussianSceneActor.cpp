@@ -67,6 +67,10 @@ void AGaussianSceneActor::OnConstruction(const FTransform& Transform)
 	if (GaussianScene && GaussianAsset && GaussianAsset->IsValidForRendering())
 	{
 		GaussianScene->WorldTransform = GetActorTransform();
+		GaussianScene->SplatScale = SplatScaleOverride;
+		GaussianScene->AlphaCullThreshold = AlphaCullThresholdOverride;
+		GaussianScene->CutoffK = CutoffKOverride;
+		GaussianScene->CovarianceDilation = CovarianceDilationOverride;
 		UpdateBoundsVisual();
 
 		if (GaussianScene->IsRegisteredWithRenderer())
@@ -120,6 +124,23 @@ void AGaussianSceneActor::PostEditChangeProperty(FPropertyChangedEvent& Property
 		RebuildGaussianScene();
 		TryRegisterScene();
 	}
+	else if (PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, SplatScaleOverride)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, AlphaCullThresholdOverride)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, CutoffKOverride)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, CovarianceDilationOverride))
+	{
+		if (GaussianScene)
+		{
+			GaussianScene->SplatScale = SplatScaleOverride;
+			GaussianScene->AlphaCullThreshold = AlphaCullThresholdOverride;
+			GaussianScene->CutoffK = CutoffKOverride;
+			GaussianScene->CovarianceDilation = CovarianceDilationOverride;
+			if (GaussianScene->IsRegisteredWithRenderer())
+			{
+				FGaussianRenderer::Get().MarkSceneDirty(GaussianScene);
+			}
+		}
+	}
 }
 
 void AGaussianSceneActor::PostEditMove(bool bFinished)
@@ -172,6 +193,10 @@ void AGaussianSceneActor::RebuildGaussianScene()
 
 	GaussianScene->WorldTransform = GetActorTransform();
 	GaussianScene->bEnableRendering = bEnableRendering;
+	GaussianScene->SplatScale = SplatScaleOverride;
+	GaussianScene->AlphaCullThreshold = AlphaCullThresholdOverride;
+	GaussianScene->CutoffK = CutoffKOverride;
+	GaussianScene->CovarianceDilation = CovarianceDilationOverride;
 	GaussianScene->Chunks.Reset();
 
 	if (GaussianAsset && GaussianAsset->IsValidForRendering())
@@ -212,6 +237,10 @@ void AGaussianSceneActor::RegisterScene()
 
 	GaussianAsset->InitGPUResources();
 	GaussianScene->WorldTransform = GetActorTransform();
+	GaussianScene->SplatScale = SplatScaleOverride;
+	GaussianScene->AlphaCullThreshold = AlphaCullThresholdOverride;
+	GaussianScene->CutoffK = CutoffKOverride;
+	GaussianScene->CovarianceDilation = CovarianceDilationOverride;
 	GaussianScene->RegisterWithRenderer();
 }
 

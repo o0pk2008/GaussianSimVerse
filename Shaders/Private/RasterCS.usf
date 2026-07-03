@@ -6,6 +6,7 @@
 
 float4x4 LocalToWorldMatrix;
 float3 PreViewTranslation;
+float4x4 TranslatedViewMatrix;
 float4x4 TranslatedWorldToClip;
 float4 ViewportRect;
 float4 ViewRect;
@@ -14,6 +15,11 @@ uint BatchCount;
 uint SortedCount;
 uint GaussianCount;
 float SplatScale;
+float GaussianAlphaCutoff;
+float GaussianAlphaCullThreshold;
+float GaussianCutoffK;
+float GaussianCovarianceDilation;
+float GaussianMinSigmaPixels;
 uint MaxRasterRadius;
 uint bDebugOverlay;
 
@@ -55,54 +61,63 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 	}
 
 	const FGaussianSplatGPU Splat = LoadGaussianSplat(GaussianSplatsVec4, GaussianIndex);
-
-	const float4 ClipPos = LocalToClipPosition(Splat.Position, LocalToWorldMatrix, PreViewTranslation, TranslatedWorldToClip);
-	if (!GaussianRasterVisible(ClipPos))
+	if (Splat.Opacity < GaussianAlphaCullThreshold)
 	{
 		return;
 	}
 
-	const float2 ScreenCenter = ClipToScreen(ClipPos, ViewportRect, ViewRect);
-
-	float Radius = 8.0;
-	if (bDebugOverlay == 0u)
+	float2 ScreenCenter;
+	float3 InvConic;
+	float2 Extent;
+	float3 ViewPosition;
+	float EffectiveOpacity;
+	if (!ProjectSplatEllipse(
+		Splat,
+		LocalToWorldMatrix,
+		PreViewTranslation,
+		TranslatedViewMatrix,
+		TranslatedWorldToClip,
+		ViewportRect,
+		ViewRect,
+		SplatScale,
+		GaussianCutoffK,
+		GaussianCovarianceDilation,
+		GaussianMinSigmaPixels,
+		MaxRasterRadius,
+		ScreenCenter,
+		InvConic,
+		Extent,
+		ViewPosition,
+		EffectiveOpacity))
 	{
-		const float MaxScale = max(Splat.Scale.x, max(Splat.Scale.y, Splat.Scale.z));
-		const float Depth = max(ClipPos.w, 1e-2);
-		const float FocalPixels = abs(TranslatedWorldToClip[0][0]) * ViewportRect.z * 0.5;
-		Radius = clamp(
-			MaxScale * FocalPixels / Depth * SplatScale,
-			1.0,
-			(float)MaxRasterRadius);
+		return;
 	}
 
 	const int2 ViewMin = int2(ViewRect.xy);
 	const int2 ViewMax = int2(ViewRect.xy) + int2(ViewRect.zw) - int2(1, 1);
-	const int2 MinPixel = int2(floor(ScreenCenter - Radius));
-	const int2 MaxPixel = int2(ceil(ScreenCenter + Radius));
+	const int2 MinPixel = int2(floor(ScreenCenter - Extent));
+	const int2 MaxPixel = int2(ceil(ScreenCenter + Extent));
 
 	for (int Y = max(MinPixel.y, ViewMin.y); Y <= min(MaxPixel.y, ViewMax.y); ++Y)
 	{
 		for (int X = max(MinPixel.x, ViewMin.x); X <= min(MaxPixel.x, ViewMax.x); ++X)
 		{
-			const float2 Delta = float2(X, Y) - ScreenCenter;
-			const float DistSq = dot(Delta, Delta);
-			const float SigmaSq = Radius * Radius;
-			if (DistSq > SigmaSq)
-			{
-				continue;
-			}
-
 			float Alpha = 1.0;
 			float3 Color = float3(1.0, 0.1, 0.8);
 
 			if (bDebugOverlay == 0u)
 			{
-				const float Sigma = max(Radius * 0.35, 0.5);
-				const float Gaussian = exp(-0.5 * DistSq / (Sigma * Sigma));
-				Alpha = saturate(Splat.Opacity * Gaussian);
+				Alpha = EvaluateSplatAlphaEllipse(float2(X, Y) + 0.5, ScreenCenter, InvConic, EffectiveOpacity, GaussianCutoffK, bDebugOverlay);
 				Color = Splat.Color.rgb;
-				if (Alpha < (1.0 / 255.0))
+				if (Alpha < GaussianAlphaCutoff)
+				{
+					continue;
+				}
+			}
+			else
+			{
+				Alpha = EvaluateSplatAlphaEllipse(float2(X, Y) + 0.5, ScreenCenter, InvConic, EffectiveOpacity, GaussianCutoffK, bDebugOverlay);
+				if (Alpha < GaussianAlphaCutoff)
 				{
 					continue;
 				}

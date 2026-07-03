@@ -28,8 +28,14 @@ namespace GaussianImport
 	/** Standard 3DGS PLY coords (common training export) to UE. */
 	GAUSSIANSIMVERSEEDITOR_API FVector3f PlyToUEPosition(const FVector3f& Position);
 
-	/** Convert meter-based Gaussian scale to UE centimeters. */
+	/** Standard 3DGS / COLMAP PLY direction to UE without unit conversion. */
+	GAUSSIANSIMVERSEEDITOR_API FVector3f PlyToUEDirection(const FVector3f& Direction);
+
+	/** Convert meter-based Gaussian scale to UE centimeters (PlayCanvas / SOG). */
 	GAUSSIANSIMVERSEEDITOR_API FVector3f MetersToUEScale(const FVector3f& Scale);
+
+	/** Standard 3DGS / COLMAP PLY scale to UE centimeters (no axis permutation). */
+	GAUSSIANSIMVERSEEDITOR_API FVector3f PlyMetersToUEScale(const FVector3f& Scale);
 
 	GAUSSIANSIMVERSEEDITOR_API FVector4f PlyToUERotation(float W, float X, float Y, float Z);
 

@@ -22,6 +22,13 @@ namespace GaussianSimVerse::RenderSettings
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarMaxRasterSplats;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarDebugRender;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarDebugOverlay;
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarUseTileRaster;
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarMaxSplatsPerTile;
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<float> CVarAlphaCutoff;
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<float> CVarAlphaCullThreshold;
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<float> CVarCutoffK;
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<float> CVarCovarianceDilation;
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<float> CVarMinSigmaPixels;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarUseResolvedSceneColor;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarPostProcessPass;
 
@@ -68,6 +75,41 @@ namespace GaussianSimVerse::RenderSettings
 	FORCEINLINE bool IsDebugOverlayEnabled()
 	{
 		return CVarDebugOverlay.GetValueOnAnyThread() != 0;
+	}
+
+	FORCEINLINE bool UseTileRaster()
+	{
+		return CVarUseTileRaster.GetValueOnAnyThread() != 0;
+	}
+
+	FORCEINLINE int32 GetMaxSplatsPerTile()
+	{
+		return FMath::Clamp(CVarMaxSplatsPerTile.GetValueOnAnyThread(), 16, 8192);
+	}
+
+	FORCEINLINE float GetAlphaCutoff()
+	{
+		return FMath::Clamp(CVarAlphaCutoff.GetValueOnAnyThread(), 0.0f, 1.0f);
+	}
+
+	FORCEINLINE float GetAlphaCullThreshold()
+	{
+		return FMath::Clamp(CVarAlphaCullThreshold.GetValueOnAnyThread(), 0.0f, 1.0f);
+	}
+
+	FORCEINLINE float GetCutoffK()
+	{
+		return FMath::Max(0.25f, CVarCutoffK.GetValueOnAnyThread());
+	}
+
+	FORCEINLINE float GetCovarianceDilation()
+	{
+		return FMath::Max(0.0f, CVarCovarianceDilation.GetValueOnAnyThread());
+	}
+
+	FORCEINLINE float GetMinSigmaPixels()
+	{
+		return FMath::Max(0.0f, CVarMinSigmaPixels.GetValueOnAnyThread());
 	}
 
 	FORCEINLINE float GetFrustumMargin()

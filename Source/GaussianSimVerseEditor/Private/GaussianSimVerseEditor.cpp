@@ -11,11 +11,54 @@
 #include "Import/GaussianImportUtils.h"
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
+#include "Math/UnrealMathUtility.h"
 #include "Misc/Paths.h"
 
 #define LOCTEXT_NAMESPACE "FGaussianSimVerseEditorModule"
 
 static TSharedPtr<FAssetTypeActions_GaussianAsset> GaussianAssetTypeActions;
+
+namespace
+{
+	struct FGaussianImportStats
+	{
+		FVector3f MinScale = FVector3f(FLT_MAX, FLT_MAX, FLT_MAX);
+		FVector3f MaxScale = FVector3f(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+		float MinAlpha = FLT_MAX;
+		float MaxAlpha = -FLT_MAX;
+		int32 LowAlphaCount = 0;
+	};
+
+	FGaussianImportStats BuildImportStats(const TArray<FGaussianSplatData>& Splats)
+	{
+		FGaussianImportStats Stats;
+		for (const FGaussianSplatData& Splat : Splats)
+		{
+			Stats.MinScale.X = FMath::Min(Stats.MinScale.X, Splat.Scale.X);
+			Stats.MinScale.Y = FMath::Min(Stats.MinScale.Y, Splat.Scale.Y);
+			Stats.MinScale.Z = FMath::Min(Stats.MinScale.Z, Splat.Scale.Z);
+			Stats.MaxScale.X = FMath::Max(Stats.MaxScale.X, Splat.Scale.X);
+			Stats.MaxScale.Y = FMath::Max(Stats.MaxScale.Y, Splat.Scale.Y);
+			Stats.MaxScale.Z = FMath::Max(Stats.MaxScale.Z, Splat.Scale.Z);
+			Stats.MinAlpha = FMath::Min(Stats.MinAlpha, Splat.Color.W);
+			Stats.MaxAlpha = FMath::Max(Stats.MaxAlpha, Splat.Color.W);
+			if (Splat.Color.W <= (1.0f / 255.0f))
+			{
+				++Stats.LowAlphaCount;
+			}
+		}
+
+		if (Splats.Num() == 0)
+		{
+			Stats.MinScale = FVector3f::ZeroVector;
+			Stats.MaxScale = FVector3f::ZeroVector;
+			Stats.MinAlpha = 0.0f;
+			Stats.MaxAlpha = 0.0f;
+		}
+
+		return Stats;
+	}
+}
 
 void FGaussianSimVerseEditorModule::StartupModule()
 {
@@ -102,6 +145,8 @@ bool FGaussianImporter::ImportFile(const FString& FilePath, UGaussianAsset* OutA
 	OutAsset->ImportSourcePath = FilePath;
 	OutAsset->SetStagingData(Splats);
 
+	const FGaussianImportStats ImportStats = BuildImportStats(Splats);
+
 	if (OutAsset->SourceFormat == EGaussianSourceFormat::SOG && !ExtractedDirectory.IsEmpty())
 	{
 		FGaussianSogTextureImporter::ImportCompanionTextures(
@@ -110,6 +155,17 @@ bool FGaussianImporter::ImportFile(const FString& FilePath, UGaussianAsset* OutA
 			DestinationPackage ? DestinationPackage : OutAsset->GetOutermost());
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("Imported %d Gaussians from %s (PlayCanvas Y-up -> UE Z-up conversion applied)"), Splats.Num(), *FilePath);
+	UE_LOG(
+		LogTemp,
+		Log,
+		TEXT("Imported %d Gaussians from %s | Format=%d | Bounds Origin=(%.2f, %.2f, %.2f) Extent=(%.2f, %.2f, %.2f) | Alpha=[%.4f, %.4f] LowAlpha=%d | ScaleMin=(%.4f, %.4f, %.4f) ScaleMax=(%.4f, %.4f, %.4f)"),
+		Splats.Num(),
+		*FilePath,
+		static_cast<int32>(OutAsset->SourceFormat),
+		OutAsset->Bounds.Origin.X, OutAsset->Bounds.Origin.Y, OutAsset->Bounds.Origin.Z,
+		OutAsset->Bounds.Extent.X, OutAsset->Bounds.Extent.Y, OutAsset->Bounds.Extent.Z,
+		ImportStats.MinAlpha, ImportStats.MaxAlpha, ImportStats.LowAlphaCount,
+		ImportStats.MinScale.X, ImportStats.MinScale.Y, ImportStats.MinScale.Z,
+		ImportStats.MaxScale.X, ImportStats.MaxScale.Y, ImportStats.MaxScale.Z);
 	return true;
 }
