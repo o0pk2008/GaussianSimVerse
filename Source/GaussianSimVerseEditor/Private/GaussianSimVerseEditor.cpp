@@ -130,7 +130,8 @@ bool FGaussianImporter::ImportFile(const FString& FilePath, UGaussianAsset* OutA
 	}
 	else if (Extension == TEXT("sog") || Extension == TEXT("json"))
 	{
-		bSuccess = FGaussianSogReader::ReadFile(FilePath, Splats, OutError, &ExtractedDirectory);
+		bSuccess = FGaussianSogReader::ReadFile(
+			FilePath, Splats, OutError, &ExtractedDirectory, &ShCoefficients, &ImportedShDegree);
 		OutAsset->SourceFormat = EGaussianSourceFormat::SOG;
 	}
 	else

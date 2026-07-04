@@ -100,8 +100,22 @@ namespace GaussianSogPrivate
 	}
 }
 
-bool FGaussianSogReader::ReadDirectory(const FString& DirectoryPath, TArray<FGaussianSplatData>& OutSplats, FString& OutError)
+bool FGaussianSogReader::ReadDirectory(
+	const FString& DirectoryPath,
+	TArray<FGaussianSplatData>& OutSplats,
+	FString& OutError,
+	TArray<float>* OutShCoefficients,
+	int32* OutImportedShDegree)
 {
+	if (OutShCoefficients)
+	{
+		OutShCoefficients->Reset();
+	}
+	if (OutImportedShDegree)
+	{
+		*OutImportedShDegree = 0;
+	}
+
 	const FString MetaPath = FPaths::Combine(DirectoryPath, TEXT("meta.json"));
 	TSharedPtr<FJsonObject> MetaObject;
 	if (!GaussianSogPrivate::LoadJson(MetaPath, MetaObject, OutError))
@@ -219,6 +233,86 @@ bool FGaussianSogReader::ReadDirectory(const FString& DirectoryPath, TArray<FGau
 		return false;
 	}
 
+	// Optional higher-order SH (shN): labels -> centroids palette -> codebook.
+	const TSharedPtr<FJsonObject>* ShNObject = nullptr;
+	FGaussianImageRGBA8 ShNCentroids;
+	FGaussianImageRGBA8 ShNLabels;
+	TArray<float> ShNCodebook;
+	int32 ShNBands = 0;
+	int32 ShNPaletteCount = 0;
+	int32 ShNRestCoeffs = 0;
+	bool bHasShN = false;
+
+	if (MetaObject->TryGetObjectField(TEXT("shN"), ShNObject) && ShNObject && (*ShNObject).IsValid())
+	{
+		const TArray<TSharedPtr<FJsonValue>>* ShNFiles = nullptr;
+		(*ShNObject)->TryGetArrayField(TEXT("files"), ShNFiles);
+		(*ShNObject)->TryGetNumberField(TEXT("bands"), ShNBands);
+		(*ShNObject)->TryGetNumberField(TEXT("count"), ShNPaletteCount);
+
+		static const int32 RestCoeffsByBand[4] = { 0, 3, 8, 15 };
+		ShNRestCoeffs = (ShNBands >= 0 && ShNBands <= 3) ? RestCoeffsByBand[ShNBands] : 0;
+
+		FString ShNError;
+		if (ShNRestCoeffs > 0
+			&& ShNPaletteCount > 0
+			&& ShNFiles
+			&& ShNFiles->Num() >= 2
+			&& GaussianSogPrivate::LoadCodebook(*ShNObject, TEXT("codebook"), ShNCodebook, ShNError))
+		{
+			const FString CentroidsPath = GaussianSogPrivate::ResolveImagePath(DirectoryPath, ShNFiles, 0, ShNError);
+			const FString LabelsPath = GaussianSogPrivate::ResolveImagePath(DirectoryPath, ShNFiles, 1, ShNError);
+			if (!CentroidsPath.IsEmpty()
+				&& !LabelsPath.IsEmpty()
+				&& FGaussianWebPLoader::LoadFile(CentroidsPath, ShNCentroids, ShNError)
+				&& FGaussianWebPLoader::LoadFile(LabelsPath, ShNLabels, ShNError))
+			{
+				const int32 ExpectedCentroidWidth = 64 * ShNRestCoeffs;
+				if (ShNLabels.Width * ShNLabels.Height < Count)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("SOG shN labels texture too small; importing without higher-order SH"));
+				}
+				else if (ShNCentroids.Width != ExpectedCentroidWidth)
+				{
+					UE_LOG(LogTemp, Warning,
+						TEXT("SOG shN centroids width %d != expected %d (bands=%d); importing without higher-order SH"),
+						ShNCentroids.Width, ExpectedCentroidWidth, ShNBands);
+				}
+				else
+				{
+					bHasShN = true;
+				}
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning, TEXT("SOG shN present but failed to load (%s); importing SH0 only"), *ShNError);
+			}
+		}
+		else if (ShNRestCoeffs > 0)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("SOG shN present but incomplete (%s); importing SH0 only"), *ShNError);
+		}
+	}
+
+	if (OutImportedShDegree)
+	{
+		*OutImportedShDegree = bHasShN ? ShNBands : 0;
+	}
+	if (OutShCoefficients)
+	{
+		OutShCoefficients->Reset();
+		if (bHasShN)
+		{
+			OutShCoefficients->SetNumZeroed(Count * GaussianShCoefficientsPerSplat);
+		}
+	}
+
+	if (!bHasShN)
+	{
+		UE_LOG(LogTemp, Log,
+			TEXT("SOG has no shN section (higher-order SH). SH Band control will only affect assets exported with SH."));
+	}
+
 	OutSplats.Reset();
 	OutSplats.Reserve(Count);
 
@@ -269,12 +363,62 @@ bool FGaussianSogReader::ReadDirectory(const FString& DirectoryPath, TArray<FGau
 		Splat.Rotation = GaussianSogPrivate::DecodeSogQuaternion(QuatsR, QuatsG, QuatsB, QuatsA, OutError);
 		Splat.Color = GaussianImport::SH0ToLinearColor(Fdc0, Fdc1, Fdc2, Opacity);
 		OutSplats.Add(Splat);
+
+		if (bHasShN && OutShCoefficients)
+		{
+			const int32 ShBase = Index * GaussianShCoefficientsPerSplat;
+			(*OutShCoefficients)[ShBase + 0] = Fdc0;
+			(*OutShCoefficients)[ShBase + 1] = Fdc1;
+			(*OutShCoefficients)[ShBase + 2] = Fdc2;
+
+			const int32 LabelX = Index % ShNLabels.Width;
+			const int32 LabelY = Index / ShNLabels.Width;
+			uint8 LabelR = 0, LabelG = 0, LabelB = 0, LabelA = 0;
+			ShNLabels.GetPixel(LabelX, LabelY, LabelR, LabelG, LabelB, LabelA);
+			const int32 PaletteIndex = static_cast<int32>(LabelR) | (static_cast<int32>(LabelG) << 8);
+			if (PaletteIndex >= 0 && PaletteIndex < ShNPaletteCount)
+			{
+				const int32 CentroidCol = PaletteIndex % 64;
+				const int32 CentroidRow = PaletteIndex / 64;
+				for (int32 Coeff = 0; Coeff < ShNRestCoeffs; ++Coeff)
+				{
+					const int32 Cx = CentroidCol * ShNRestCoeffs + Coeff;
+					const int32 Cy = CentroidRow;
+					if (Cx < 0 || Cy < 0 || Cx >= ShNCentroids.Width || Cy >= ShNCentroids.Height)
+					{
+						continue;
+					}
+
+					uint8 Cr = 0, Cg = 0, Cb = 0, Ca = 0;
+					ShNCentroids.GetPixel(Cx, Cy, Cr, Cg, Cb, Ca);
+					const float RestR = ShNCodebook.IsValidIndex(Cr) ? ShNCodebook[Cr] : 0.0f;
+					const float RestG = ShNCodebook.IsValidIndex(Cg) ? ShNCodebook[Cg] : 0.0f;
+					const float RestB = ShNCodebook.IsValidIndex(Cb) ? ShNCodebook[Cb] : 0.0f;
+					// Interleaved RGB per rest coefficient (matches PLY / shader layout).
+					(*OutShCoefficients)[ShBase + 3 + Coeff * 3 + 0] = RestR;
+					(*OutShCoefficients)[ShBase + 3 + Coeff * 3 + 1] = RestG;
+					(*OutShCoefficients)[ShBase + 3 + Coeff * 3 + 2] = RestB;
+				}
+			}
+		}
+	}
+
+	if (bHasShN)
+	{
+		UE_LOG(LogTemp, Log, TEXT("Imported SOG with %d Gaussians (SH degree %d, palette %d)"),
+			OutSplats.Num(), ShNBands, ShNPaletteCount);
 	}
 
 	return OutSplats.Num() > 0;
 }
 
-bool FGaussianSogReader::ReadFile(const FString& FilePath, TArray<FGaussianSplatData>& OutSplats, FString& OutError, FString* OutExtractedDirectory)
+bool FGaussianSogReader::ReadFile(
+	const FString& FilePath,
+	TArray<FGaussianSplatData>& OutSplats,
+	FString& OutError,
+	FString* OutExtractedDirectory,
+	TArray<float>* OutShCoefficients,
+	int32* OutImportedShDegree)
 {
 	const FString Extension = FPaths::GetExtension(FilePath).ToLower();
 	const FString AbsolutePath = FPaths::ConvertRelativePathToFull(FilePath);
@@ -285,7 +429,7 @@ bool FGaussianSogReader::ReadFile(const FString& FilePath, TArray<FGaussianSplat
 		{
 			*OutExtractedDirectory = FPaths::GetPath(AbsolutePath);
 		}
-		return ReadDirectory(FPaths::GetPath(AbsolutePath), OutSplats, OutError);
+		return ReadDirectory(FPaths::GetPath(AbsolutePath), OutSplats, OutError, OutShCoefficients, OutImportedShDegree);
 	}
 
 	if (Extension == TEXT("sog"))
@@ -299,7 +443,7 @@ bool FGaussianSogReader::ReadFile(const FString& FilePath, TArray<FGaussianSplat
 		{
 			*OutExtractedDirectory = ExtractedDir;
 		}
-		return ReadDirectory(ExtractedDir, OutSplats, OutError);
+		return ReadDirectory(ExtractedDir, OutSplats, OutError, OutShCoefficients, OutImportedShDegree);
 	}
 
 	if (IFileManager::Get().DirectoryExists(*AbsolutePath))
@@ -308,7 +452,7 @@ bool FGaussianSogReader::ReadFile(const FString& FilePath, TArray<FGaussianSplat
 		{
 			*OutExtractedDirectory = AbsolutePath;
 		}
-		return ReadDirectory(AbsolutePath, OutSplats, OutError);
+		return ReadDirectory(AbsolutePath, OutSplats, OutError, OutShCoefficients, OutImportedShDegree);
 	}
 
 	OutError = FString::Printf(TEXT("Unsupported SOG input: %s"), *FilePath);
