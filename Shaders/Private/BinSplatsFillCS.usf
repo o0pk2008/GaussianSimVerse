@@ -92,23 +92,39 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 
 	if (MaxBinExtent < GAUSSIAN_TILE_HOME_BIN_MAX_EXTENT)
 	{
+		// Small/medium footprints: at most a 3x3 tile neighborhood (home + axis + corners).
+		// Previously only Y neighbors were added, which caused vertical tile seams at medium
+		// distance (close uses full range, far uses global / single-tile).
 		const int2 HomeTile = GetSplatHomeTileCoord(ScreenCenter, ViewRect, NumTilesX, NumTilesY);
 		const int2 ViewMin = int2(ViewRect.xy);
+		const int TileLeftX = ViewMin.x + HomeTile.x * int(GAUSSIAN_TILE_SIZE);
+		const int TileRightX = TileLeftX + int(GAUSSIAN_TILE_SIZE) - 1;
 		const int TileTopY = ViewMin.y + HomeTile.y * int(GAUSSIAN_TILE_SIZE);
 		const int TileBottomY = TileTopY + int(GAUSSIAN_TILE_SIZE) - 1;
+		const float MinX = ScreenCenter.x - BinExtent.x;
+		const float MaxX = ScreenCenter.x + BinExtent.x;
 		const float MinY = ScreenCenter.y - BinExtent.y;
 		const float MaxY = ScreenCenter.y + BinExtent.y;
 
-		AddSplatToTileList(HomeTile, NumTilesX, NumTilesY, SortedIndex, SortKey, TileOffsets, RWTileFillCounters, RWTileSplats);
+		const int Dx0 = (MinX < float(TileLeftX) && HomeTile.x > 0) ? -1 : 0;
+		const int Dx1 = (MaxX > float(TileRightX) && HomeTile.x + 1 < (int)NumTilesX) ? 1 : 0;
+		const int Dy0 = (MinY < float(TileTopY) && HomeTile.y > 0) ? -1 : 0;
+		const int Dy1 = (MaxY > float(TileBottomY) && HomeTile.y + 1 < (int)NumTilesY) ? 1 : 0;
 
-		if (MinY < float(TileTopY) && HomeTile.y > 0)
+		for (int Dy = Dy0; Dy <= Dy1; ++Dy)
 		{
-			AddSplatToTileList(int2(HomeTile.x, HomeTile.y - 1), NumTilesX, NumTilesY, SortedIndex, SortKey, TileOffsets, RWTileFillCounters, RWTileSplats);
-		}
-
-		if (MaxY > float(TileBottomY) && HomeTile.y + 1 < (int)NumTilesY)
-		{
-			AddSplatToTileList(int2(HomeTile.x, HomeTile.y + 1), NumTilesX, NumTilesY, SortedIndex, SortKey, TileOffsets, RWTileFillCounters, RWTileSplats);
+			for (int Dx = Dx0; Dx <= Dx1; ++Dx)
+			{
+				AddSplatToTileList(
+					int2(HomeTile.x + Dx, HomeTile.y + Dy),
+					NumTilesX,
+					NumTilesY,
+					SortedIndex,
+					SortKey,
+					TileOffsets,
+					RWTileFillCounters,
+					RWTileSplats);
+			}
 		}
 	}
 	else
