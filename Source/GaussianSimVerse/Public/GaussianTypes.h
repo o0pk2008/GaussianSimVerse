@@ -16,6 +16,20 @@ enum class EGaussianSourceFormat : uint8
 	SPZ     UMETA(DisplayName = "SPZ"),
 };
 
+/** Spherical harmonics band used at render time (SH0 = diffuse only). */
+UENUM(BlueprintType)
+enum class EGaussianSHBand : uint8
+{
+	SH0 UMETA(DisplayName = "SH0"),
+	SH1 UMETA(DisplayName = "SH1"),
+	SH2 UMETA(DisplayName = "SH2"),
+	SH3 UMETA(DisplayName = "SH3"),
+};
+
+constexpr int32 GaussianShRestCoefficientCount = 45;
+constexpr int32 GaussianShDcCoefficientCount = 3;
+constexpr int32 GaussianShCoefficientsPerSplat = GaussianShDcCoefficientCount + GaussianShRestCoefficientCount;
+
 /** Per-Gaussian attributes stored on GPU (Phase 2+). Layout matches shader GaussianCommon.ush. */
 USTRUCT(BlueprintType)
 struct GAUSSIANSIMVERSE_API FGaussianSplatData

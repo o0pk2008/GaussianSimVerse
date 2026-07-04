@@ -8,5 +8,10 @@
 class GAUSSIANSIMVERSEEDITOR_API FGaussianPlyReader
 {
 public:
-	static bool ReadFile(const FString& FilePath, TArray<FGaussianSplatData>& OutSplats, FString& OutError);
+	static bool ReadFile(
+		const FString& FilePath,
+		TArray<FGaussianSplatData>& OutSplats,
+		FString& OutError,
+		TArray<float>* OutShCoefficients = nullptr,
+		int32* OutImportedShDegree = nullptr);
 };

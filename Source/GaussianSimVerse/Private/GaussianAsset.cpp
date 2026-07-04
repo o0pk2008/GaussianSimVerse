@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "GaussianAsset.h"
+#include "GaussianAssetVersion.h"
 #include "Engine/Texture2D.h"
 #include "Rendering/GaussianGPUBuffer.h"
 #include "RenderingThread.h"
@@ -12,13 +13,28 @@ UGaussianAsset::UGaussianAsset()
 void UGaussianAsset::Serialize(FArchive& Ar)
 {
 	Super::Serialize(Ar);
+	Ar.UsingCustomVersion(FGaussianAssetSerializationVersion::GUID);
+
 	Ar << BulkSplatData;
 	Ar << ImportSourcePath;
+
+	if (Ar.CustomVer(FGaussianAssetSerializationVersion::GUID) >= FGaussianAssetSerializationVersion::AddedShCoefficientData)
+	{
+		Ar << BulkShCoefficientData;
+		Ar << ImportedShDegree;
+	}
+	else if (Ar.IsLoading())
+	{
+		BulkShCoefficientData.Reset();
+		ImportedShDegree = 0;
+	}
 
 	if (Ar.IsLoading())
 	{
 		bStagingCacheLoaded = false;
 		StagingCache.Empty();
+		ShCoefficientCache.Empty();
+		bShCoefficientCacheLoaded = false;
 		GaussianCount = BulkSplatData.Num() / static_cast<int32>(sizeof(FGaussianSplatData));
 	}
 }
@@ -28,7 +44,9 @@ void UGaussianAsset::BeginDestroy()
 	ReleaseGPUResources();
 	FlushRenderingCommands();
 	StagingCache.Empty();
+	ShCoefficientCache.Empty();
 	bStagingCacheLoaded = false;
+	bShCoefficientCacheLoaded = false;
 	Super::BeginDestroy();
 }
 
@@ -79,6 +97,37 @@ void UGaussianAsset::EncodeStagingToBulk(const TArray<FGaussianSplatData>& InSta
 	}
 }
 
+void UGaussianAsset::EnsureShCoefficientsLoaded() const
+{
+	if (bShCoefficientCacheLoaded)
+	{
+		return;
+	}
+
+	const int32 FloatCount = BulkShCoefficientData.Num() / static_cast<int32>(sizeof(float));
+	ShCoefficientCache.SetNumUninitialized(FloatCount);
+	if (FloatCount > 0)
+	{
+		FMemory::Memcpy(ShCoefficientCache.GetData(), BulkShCoefficientData.GetData(), BulkShCoefficientData.Num());
+	}
+
+	bShCoefficientCacheLoaded = true;
+}
+
+void UGaussianAsset::EncodeShCoefficientsToBulk(const TArray<float>& InShCoefficients)
+{
+	const int32 ByteCount = InShCoefficients.Num() * static_cast<int32>(sizeof(float));
+	BulkShCoefficientData.SetNumUninitialized(ByteCount);
+	if (ByteCount > 0)
+	{
+		FMemory::Memcpy(BulkShCoefficientData.GetData(), InShCoefficients.GetData(), ByteCount);
+	}
+	else
+	{
+		BulkShCoefficientData.Reset();
+	}
+}
+
 void UGaussianAsset::EnsureStagingLoaded() const
 {
 	if (bStagingCacheLoaded)
@@ -105,13 +154,14 @@ void UGaussianAsset::InitGPUResources()
 	}
 
 	EnsureStagingLoaded();
+	EnsureShCoefficientsLoaded();
 
 	if (!GPUBuffer.IsValid())
 	{
 		GPUBuffer = MakeShared<FGaussianGPUBuffer, ESPMode::ThreadSafe>();
 	}
 
-	GPUBuffer->SetCPUDataFromStaging(StagingCache);
+	GPUBuffer->SetCPUDataFromStaging(StagingCache, ShCoefficientCache, ImportedShDegree);
 	GaussianCount = StagingCache.Num();
 }
 
@@ -136,7 +186,16 @@ void UGaussianAsset::ReleaseGPUResources()
 
 void UGaussianAsset::SetStagingData(const TArray<FGaussianSplatData>& InStagingData)
 {
+	SetStagingData(InStagingData, TArray<float>(), 0);
+}
+
+void UGaussianAsset::SetStagingData(
+	const TArray<FGaussianSplatData>& InStagingData,
+	TArray<float>&& InShCoefficients,
+	int32 InImportedShDegree)
+{
 	Bounds = ComputeBounds(InStagingData);
+	ImportedShDegree = FMath::Clamp(InImportedShDegree, 0, 3);
 
 	TArray<FGaussianSplatData> CenteredData = InStagingData;
 	const FVector3f WorldCenter = Bounds.Origin;
@@ -146,14 +205,17 @@ void UGaussianAsset::SetStagingData(const TArray<FGaussianSplatData>& InStagingD
 	}
 
 	EncodeStagingToBulk(CenteredData);
+	EncodeShCoefficientsToBulk(InShCoefficients);
 	GaussianCount = CenteredData.Num();
 
 	StagingCache = MoveTemp(CenteredData);
 	bStagingCacheLoaded = true;
+	ShCoefficientCache = MoveTemp(InShCoefficients);
+	bShCoefficientCacheLoaded = true;
 
 	if (GPUBuffer.IsValid())
 	{
-		GPUBuffer->SetCPUDataFromStaging(StagingCache);
+		GPUBuffer->SetCPUDataFromStaging(StagingCache, ShCoefficientCache, ImportedShDegree);
 	}
 }
 

@@ -116,17 +116,27 @@ namespace GaussianSimVerse::RenderSettings
 		{
 			return false;
 		}
-		if (RasterMode == 1)
-		{
-			return true;
-		}
-
-		(void)EstimatedSplatsPerTile;
-		(void)MaxSplatsPerTile;
-
 		const float SafeRadius = FMath::Max(SceneBoundsRadius, 1.0f);
 		const float DistanceToRadius = ViewDistanceToScene / SafeRadius;
 		const float FarViewRatio = FMath::Max(2.0f, CVarAdaptiveFarViewRatio.GetValueOnAnyThread());
+
+		if (RasterMode == 1)
+		{
+			// Tile-first mode still falls back to global when clearly far; otherwise all splats
+			// cluster into a few tiles and overflow the per-tile cap (empty bbox at distance).
+			if (DistanceToRadius > FarViewRatio)
+			{
+				return false;
+			}
+			if (EstimatedSplatsPerTile > static_cast<uint32>(FMath::Max(16, (MaxSplatsPerTile * 3) / 4)))
+			{
+				return false;
+			}
+			return true;
+		}
+
+		(void)MaxSplatsPerTile;
+
 		const float Hysteresis = FMath::Max(0.0f, CVarAdaptiveFarViewHysteresis.GetValueOnAnyThread());
 
 		if (bInOutLastUsedTilePath)

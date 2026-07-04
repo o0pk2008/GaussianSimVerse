@@ -3,6 +3,7 @@
 #include "Rendering/GaussianGPUBuffer.h"
 #include "Rendering/GaussianRenderSettings.h"
 #include "GaussianSimVerse.h"
+#include "GaussianTypes.h"
 #include "RenderGraphUtils.h"
 #include "RHIResources.h"
 
@@ -16,8 +17,24 @@ void FGaussianGPUBuffer::SetCPUData(TArray<FGaussianSplatGPU>&& InSplatData)
 
 void FGaussianGPUBuffer::SetCPUDataFromStaging(const TArray<FGaussianSplatData>& StagingData)
 {
+	SetCPUDataFromStaging(StagingData, TArray<float>(), 0);
+}
+
+void FGaussianGPUBuffer::SetCPUDataFromStaging(
+	const TArray<FGaussianSplatData>& StagingData,
+	const TArray<float>& ShCoefficients,
+	int32 InImportedShDegree)
+{
 	TArray<FGaussianSplatGPU> Converted;
 	GaussianGPU::ConvertSplatDataArray(StagingData, Converted);
+	ImportedShDegree = static_cast<uint32>(FMath::Clamp(InImportedShDegree, 0, 3));
+	ShCoefficientCPUData = ShCoefficients;
+	if (StagingData.Num() > 0
+		&& ShCoefficientCPUData.Num() != StagingData.Num() * GaussianShCoefficientsPerSplat)
+	{
+		ShCoefficientCPUData.Reset();
+		ImportedShDegree = 0;
+	}
 	SetCPUData(MoveTemp(Converted));
 }
 
@@ -35,6 +52,7 @@ void FGaussianGPUBuffer::ReleasePooledBuffers()
 {
 	SplatPooledBuffer.SafeRelease();
 	PositionPooledBuffer.SafeRelease();
+	ShCoefficientPooledBuffer.SafeRelease();
 }
 
 void FGaussianGPUBuffer::EnsurePooledBuffers(uint32 InNumGaussians)
@@ -50,6 +68,7 @@ void FGaussianGPUBuffer::EnsurePooledBuffers(uint32 InNumGaussians)
 	const FRDGBufferDesc PositionDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(FVector4f), InNumGaussians);
 
 	const uint32 SplatFloat4Count = InNumGaussians * (sizeof(FGaussianSplatGPU) / sizeof(FVector4f));
+	const uint32 ShCoefficientCount = InNumGaussians * GaussianShCoefficientsPerSplat;
 
 	if (!SplatPooledBuffer.IsValid() || SplatPooledBuffer->Desc.NumElements != SplatFloat4Count)
 	{
@@ -61,6 +80,21 @@ void FGaussianGPUBuffer::EnsurePooledBuffers(uint32 InNumGaussians)
 	{
 		PositionPooledBuffer = AllocatePooledBuffer(PositionDesc, TEXT("Gaussian.PositionBuffer"));
 		bDirty = true;
+	}
+
+	const bool bNeedShBuffer = ShCoefficientCPUData.Num() == static_cast<int32>(InNumGaussians * GaussianShCoefficientsPerSplat);
+	if (bNeedShBuffer)
+	{
+		const FRDGBufferDesc ShDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(float), ShCoefficientCount);
+		if (!ShCoefficientPooledBuffer.IsValid() || ShCoefficientPooledBuffer->Desc.NumElements != ShCoefficientCount)
+		{
+			ShCoefficientPooledBuffer = AllocatePooledBuffer(ShDesc, TEXT("Gaussian.ShCoefficientBuffer"));
+			bDirty = true;
+		}
+	}
+	else
+	{
+		ShCoefficientPooledBuffer.SafeRelease();
 	}
 }
 
@@ -87,6 +121,17 @@ void FGaussianGPUBuffer::UploadToPooledBuffers(FRDGBuilder& GraphBuilder)
 	AddCopyBufferPass(GraphBuilder, SplatDestBuffer, SplatUploadBuffer);
 	AddCopyBufferPass(GraphBuilder, PositionDestBuffer, PositionUploadBuffer);
 
+	if (ShCoefficientPooledBuffer.IsValid()
+		&& ShCoefficientCPUData.Num() == static_cast<int32>(NumGaussians * GaussianShCoefficientsPerSplat))
+	{
+		FRDGBufferRef ShUploadBuffer = CreateStructuredUploadBuffer(
+			GraphBuilder,
+			TEXT("Gaussian.ShCoefficientUpload"),
+			ShCoefficientCPUData);
+		FRDGBufferRef ShDestBuffer = GraphBuilder.RegisterExternalBuffer(ShCoefficientPooledBuffer);
+		AddCopyBufferPass(GraphBuilder, ShDestBuffer, ShUploadBuffer);
+	}
+
 	bDirty = false;
 
 	if (GaussianSimVerse::RenderSettings::IsGPUBufferDebugEnabled())
@@ -102,7 +147,10 @@ void FGaussianGPUBuffer::CommitToGPU(FRDGBuilder& GraphBuilder, FGaussianRDGBuff
 	OutBinding.PositionBuffer = nullptr;
 	OutBinding.SplatSRV = nullptr;
 	OutBinding.PositionSRV = nullptr;
+	OutBinding.ShCoefficientsSRV = nullptr;
 	OutBinding.NumGaussians = NumGaussians;
+	OutBinding.ImportedShDegree = ImportedShDegree;
+	OutBinding.bHasShCoefficients = 0u;
 
 	if (NumGaussians == 0)
 	{
@@ -120,4 +168,13 @@ void FGaussianGPUBuffer::CommitToGPU(FRDGBuilder& GraphBuilder, FGaussianRDGBuff
 	OutBinding.PositionBuffer = GraphBuilder.RegisterExternalBuffer(PositionPooledBuffer);
 	OutBinding.SplatSRV = GraphBuilder.CreateSRV(OutBinding.SplatBuffer);
 	OutBinding.PositionSRV = GraphBuilder.CreateSRV(OutBinding.PositionBuffer);
+	OutBinding.ImportedShDegree = ImportedShDegree;
+
+	if (ShCoefficientPooledBuffer.IsValid()
+		&& ShCoefficientCPUData.Num() == static_cast<int32>(NumGaussians * GaussianShCoefficientsPerSplat))
+	{
+		FRDGBufferRef ShBuffer = GraphBuilder.RegisterExternalBuffer(ShCoefficientPooledBuffer);
+		OutBinding.ShCoefficientsSRV = GraphBuilder.CreateSRV(ShBuffer);
+		OutBinding.bHasShCoefficients = 1u;
+	}
 }

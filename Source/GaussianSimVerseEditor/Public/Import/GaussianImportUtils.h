@@ -19,24 +19,28 @@ namespace GaussianImport
 	GAUSSIANSIMVERSEEDITOR_API float UnlogPosition(float N);
 	GAUSSIANSIMVERSEEDITOR_API FVector3f LerpVec3(const FVector3f& Min, const FVector3f& Max, const FVector3f& T);
 
-	/** PlayCanvas RH (Y-up, Z-back) position to UE LH Z-up. */
+	/** SuperSplat authoring frame (PLY/SOG, -Y up) position to UE. */
 	GAUSSIANSIMVERSEEDITOR_API FVector3f PlayCanvasToUEPosition(const FVector3f& Position);
 
-	/** Quaternion stored as (w,x,y,z) in PlayCanvas space to UE (x,y,z,w) FVector4f. */
+	/** Quaternion (w,x,y,z) in authoring frame to UE (x,y,z,w). */
 	GAUSSIANSIMVERSEEDITOR_API FVector4f PlayCanvasToUERotation(float W, float X, float Y, float Z);
 
-	/** Standard 3DGS PLY coords (common training export) to UE. */
+	/**
+	 * PLY (standard or SuperSplat compressed) to UE — identical to SOG/PlayCanvasToUE.
+	 * SuperSplat's entity Z-180 is display-only and must not be baked into vertices.
+	 */
 	GAUSSIANSIMVERSEEDITOR_API FVector3f PlyToUEPosition(const FVector3f& Position);
 
-	/** Standard 3DGS / COLMAP PLY direction to UE without unit conversion. */
+	/** PLY direction to UE without unit conversion (same basis as PlyToUEPosition). */
 	GAUSSIANSIMVERSEEDITOR_API FVector3f PlyToUEDirection(const FVector3f& Direction);
 
 	/** Convert meter-based Gaussian scale to UE centimeters (PlayCanvas / SOG). */
 	GAUSSIANSIMVERSEEDITOR_API FVector3f MetersToUEScale(const FVector3f& Scale);
 
-	/** Standard 3DGS / COLMAP PLY scale to UE centimeters (no axis permutation). */
+	/** PLY scale to UE centimeters (no axis permutation; rotation carries orientation). */
 	GAUSSIANSIMVERSEEDITOR_API FVector3f PlyMetersToUEScale(const FVector3f& Scale);
 
+	/** PLY quaternion (w,x,y,z) to UE (x,y,z,w) — same path as SOG. */
 	GAUSSIANSIMVERSEEDITOR_API FVector4f PlyToUERotation(float W, float X, float Y, float Z);
 
 	GAUSSIANSIMVERSEEDITOR_API FVector4f SH0ToLinearColor(float Fdc0, float Fdc1, float Fdc2, float Opacity);

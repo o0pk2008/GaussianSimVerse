@@ -20,6 +20,16 @@ FGaussianRenderer& FGaussianRenderer::Get()
 	return Instance;
 }
 
+FIntRect FGaussianRenderer::GetEffectiveViewRect(const FSceneView& View)
+{
+	const FViewInfo& ViewInfo = static_cast<const FViewInfo&>(View);
+	if (ViewInfo.ViewRect.Width() > 0 && ViewInfo.ViewRect.Height() > 0)
+	{
+		return ViewInfo.ViewRect;
+	}
+	return View.UnscaledViewRect;
+}
+
 void FGaussianRenderer::EnsureViewExtensionRegistered()
 {
 	if (ViewExtension.IsValid() || !GEngine || !GEngine->ViewExtensions)
@@ -353,8 +363,8 @@ FGaussianViewData FGaussianRenderer::BuildViewData(const FSceneView& InView)
 	ViewData.PreViewTranslation = InView.ViewMatrices.GetPreViewTranslation();
 	ViewData.ViewOrigin = InView.ViewMatrices.GetViewOrigin();
 	ViewData.ViewDirection = InView.GetViewDirection();
-	ViewData.ViewRect = InView.UnscaledViewRect;
-	ViewData.RenderTargetSize = FIntPoint(InView.UnscaledViewRect.Width(), InView.UnscaledViewRect.Height());
+	ViewData.ViewRect = GetEffectiveViewRect(InView);
+	ViewData.RenderTargetSize = FIntPoint(ViewData.ViewRect.Width(), ViewData.ViewRect.Height());
 	ViewData.FOV = InView.FOV;
 	ViewData.ViewId = static_cast<uint32>(FMath::Max(0, InView.SceneViewInitOptions.StereoViewIndex));
 	ViewData.bIsPerspective = true;
@@ -387,11 +397,19 @@ void FGaussianRenderer::RenderGaussiansForView(
 	}
 
 	const FGaussianViewData ViewData = BuildViewData(View);
+	FGaussianViewData ViewDataForPass = ViewData;
+	// Post-process SceneColor is at render resolution; View.ViewRect may already be UnscaledViewRect.
+	if (SceneColorViewRect.Width() > 0 && SceneColorViewRect.Height() > 0)
+	{
+		ViewDataForPass.ViewRect = SceneColorViewRect;
+		ViewDataForPass.RenderTargetSize = SceneColorViewRect.Size();
+	}
+
 	FGaussianRDGTransientResources TransientResources = FGaussianRenderGraph::AllocateTransientResources(GraphBuilder);
 
 	FGaussianRenderGraph::FPassInputs PassInputs;
 	PassInputs.View = &View;
-	PassInputs.ViewData = ViewData;
+	PassInputs.ViewData = ViewDataForPass;
 	PassInputs.FrameResources = FrameResources;
 	PassInputs.SceneColorTexture = SceneColorTexture;
 	PassInputs.SceneColorViewRect = SceneColorViewRect;
@@ -469,7 +487,7 @@ void FGaussianRenderer::OnResolvedSceneColor(FRDGBuilder& GraphBuilder, const FS
 		{
 			if (View)
 			{
-				RenderForView(*View, View->UnscaledViewRect);
+				RenderForView(*View, GetEffectiveViewRect(*View));
 			}
 		}
 	}

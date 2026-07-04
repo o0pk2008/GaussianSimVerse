@@ -24,6 +24,10 @@ struct GAUSSIANSIMVERSE_API FGaussianRDGBufferBinding
 	float AlphaCullThreshold = 0.007843137f;
 	float CutoffK = 7.0f;
 	float CovarianceDilation = 0.3f;
+	uint32 ImportedShDegree = 0;
+	uint32 RenderShDegree = 3;
+	uint32 bHasShCoefficients = 0;
+	FRDGBufferSRVRef ShCoefficientsSRV = nullptr;
 };
 
 /** Per-chunk GPU frustum cull output (Phase 3+). */
@@ -55,6 +59,10 @@ class GAUSSIANSIMVERSE_API FGaussianGPUBuffer
 public:
 	void SetCPUData(TArray<FGaussianSplatGPU>&& InSplatData);
 	void SetCPUDataFromStaging(const TArray<FGaussianSplatData>& StagingData);
+	void SetCPUDataFromStaging(
+		const TArray<FGaussianSplatData>& StagingData,
+		const TArray<float>& ShCoefficients,
+		int32 InImportedShDegree);
 	void MarkDirty();
 
 	uint32 GetNumGaussians() const { return NumGaussians; }
@@ -74,9 +82,12 @@ private:
 
 	TArray<FGaussianSplatGPU> SplatCPUData;
 	TArray<FVector4f> PositionCPUData;
+	TArray<float> ShCoefficientCPUData;
 	uint32 NumGaussians = 0;
+	uint32 ImportedShDegree = 0;
 	bool bDirty = true;
 
 	TRefCountPtr<FRDGPooledBuffer> SplatPooledBuffer;
 	TRefCountPtr<FRDGPooledBuffer> PositionPooledBuffer;
+	TRefCountPtr<FRDGPooledBuffer> ShCoefficientPooledBuffer;
 };

@@ -41,6 +41,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Gaussian")
 	TArray<FGaussianLODInfo> LODLevels;
 
+	/** Highest SH band present in imported coefficient data (0..3). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Gaussian|Rendering")
+	int32 ImportedShDegree = 0;
+
 	bool IsValidForRendering() const;
 
 	/** Initialize or refresh the GPU buffer from stored bulk data. Game thread only. */
@@ -51,6 +55,10 @@ public:
 
 	/** Replace stored splat payload and bounds. Game thread only. */
 	void SetStagingData(const TArray<FGaussianSplatData>& InStagingData);
+	void SetStagingData(
+		const TArray<FGaussianSplatData>& InStagingData,
+		TArray<float>&& InShCoefficients,
+		int32 InImportedShDegree);
 
 	void SetSourceTextures(const TArray<class UTexture2D*>& InTextures);
 
@@ -62,14 +70,22 @@ public:
 
 private:
 	void EnsureStagingLoaded() const;
+	void EnsureShCoefficientsLoaded() const;
 	void EncodeStagingToBulk(const TArray<FGaussianSplatData>& InStagingData);
+	void EncodeShCoefficientsToBulk(const TArray<float>& InShCoefficients);
 	static FGaussianBounds ComputeBounds(const TArray<FGaussianSplatData>& Splats);
 
 	/** Serialized splat payload. Not a UPROPERTY to avoid editor details freeze. */
 	TArray<uint8> BulkSplatData;
 
+	/** Per-splat SH coefficients: f_dc(3) + f_rest(45). Empty for legacy imports. */
+	TArray<uint8> BulkShCoefficientData;
+
 	mutable TArray<FGaussianSplatData> StagingCache;
 	mutable bool bStagingCacheLoaded = false;
+
+	mutable TArray<float> ShCoefficientCache;
+	mutable bool bShCoefficientCacheLoaded = false;
 
 	TSharedPtr<FGaussianGPUBuffer, ESPMode::ThreadSafe> GPUBuffer;
 };

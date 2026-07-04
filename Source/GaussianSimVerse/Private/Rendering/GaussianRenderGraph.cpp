@@ -5,6 +5,7 @@
 #include "Rendering/GaussianRenderSettings.h"
 #include "Rendering/GaussianGPUResources.h"
 #include "GaussianSimVerse.h"
+#include "SceneView.h"
 #include "RenderGraphUtils.h"
 #include "ShaderParameterStruct.h"
 #include "GlobalShader.h"
@@ -96,6 +97,7 @@ void FGaussianRenderGraph::AddGPUBufferUploadPasses(
 			Binding.AlphaCullThreshold = SceneProxy.AlphaCullThreshold;
 			Binding.CutoffK = SceneProxy.CutoffK;
 			Binding.CovarianceDilation = SceneProxy.CovarianceDilation;
+			Binding.RenderShDegree = static_cast<uint32>(SceneProxy.ShBand);
 
 			Chunk.GPUBuffer->CommitToGPU(GraphBuilder, Binding);
 
@@ -266,6 +268,23 @@ void FGaussianRenderGraph::AddGPUDepthSortPasses(
 
 		const FGaussianRDGBufferBinding& Binding = TransientResources.GPUBuffers[CullResult.GPUBindingIndex];
 		const uint32 MaxVisibleCount = CullResult.MaxVisibleCount;
+		const int32 MaxSortElements = FMath::Max(2, GaussianSimVerse::RenderSettings::CVarMaxSortElements.GetValueOnRenderThread());
+		// Bitonic sort only fills min(count, MaxSortElements) keys. If we still rasterize the
+		// full count, SortedIndices beyond that are uninitialized — Morton-ordered SuperSplat
+		// PLY then shows only one spatial fragment (e.g. upper-left of the body).
+		if (MaxVisibleCount > static_cast<uint32>(MaxSortElements))
+		{
+			static bool bLoggedSortSkipOnce = false;
+			if (!bLoggedSortSkipOnce)
+			{
+				bLoggedSortSkipOnce = true;
+				UE_LOG(LogGaussianSimVerse, Warning,
+					TEXT("GaussianSimVerse: skipping depth sort for %u splats (limit %d). Full cloud will render unsorted. Raise r.GaussianSimVerse.MaxSortElements to sort large PLYs."),
+					MaxVisibleCount, MaxSortElements);
+			}
+			continue;
+		}
+
 		const uint32 PaddedCount = GaussianRenderGraphPrivate::GetPaddedSortCount(MaxVisibleCount);
 		if (PaddedCount < 2)
 		{
@@ -382,39 +401,51 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 	}
 
 	FRDGTextureRef SceneColorTexture = Inputs.SceneColorTexture;
+	const FIntPoint OverlayExtent(
+		FMath::Max(1, Inputs.SceneColorViewRect.Width()),
+		FMath::Max(1, Inputs.SceneColorViewRect.Height()));
+
 	FRDGTextureDesc OverlayDesc = SceneColorTexture->Desc;
+	OverlayDesc.Extent = OverlayExtent;
 	OverlayDesc.Flags |= ETextureCreateFlags::ShaderResource | ETextureCreateFlags::UAV;
 	FRDGTextureRef OverlayTexture = GraphBuilder.CreateTexture(OverlayDesc, TEXT("Gaussian.SplatOverlay"));
 	FRDGTextureUAVRef OverlayUAV = GraphBuilder.CreateUAV(OverlayTexture);
 	AddClearUAVPass(GraphBuilder, OverlayUAV, FVector4f(0.0f, 0.0f, 0.0f, 0.0f));
 
-	const FVector4f ViewportRect(
-		static_cast<float>(Inputs.ViewData.ViewRect.Min.X),
-		static_cast<float>(Inputs.ViewData.ViewRect.Min.Y),
-		static_cast<float>(Inputs.ViewData.ViewRect.Width()),
-		static_cast<float>(Inputs.ViewData.ViewRect.Height()));
+	const TArray<float> DummyShCoefficientsCPU = { 0.0f };
+	FRDGBufferRef DummyShCoefficientsBuffer = CreateStructuredUploadBuffer(
+		GraphBuilder,
+		TEXT("Gaussian.DummyShCoeffs"),
+		DummyShCoefficientsCPU);
+	FRDGBufferSRVRef DummyShCoefficientsSRV = GraphBuilder.CreateSRV(DummyShCoefficientsBuffer);
+	const FVector3f CameraWorldPosition(Inputs.ViewData.ViewOrigin);
 
+	// Local 0-based rect for projection and raster — matches SceneColor slice / base-pass render resolution.
 	const FVector4f ViewRect(
-		static_cast<float>(Inputs.SceneColorViewRect.Min.X),
-		static_cast<float>(Inputs.SceneColorViewRect.Min.Y),
-		static_cast<float>(Inputs.SceneColorViewRect.Width()),
-		static_cast<float>(Inputs.SceneColorViewRect.Height()));
+		0.0f,
+		0.0f,
+		static_cast<float>(OverlayExtent.X),
+		static_cast<float>(OverlayExtent.Y));
 
-	if (GaussianSimVerse::RenderSettings::IsRenderDebugEnabled()
-		&& (Inputs.ViewData.ViewRect.Width() != Inputs.SceneColorViewRect.Width()
-			|| Inputs.ViewData.ViewRect.Height() != Inputs.SceneColorViewRect.Height()
-			|| Inputs.ViewData.ViewRect.Min != Inputs.SceneColorViewRect.Min))
+	// ViewportRect == ViewRect here: clip-to-screen stays in overlay space; composite adds SceneColorOffset.
+	const FVector4f ViewportRect = ViewRect;
+
+	const FIntPoint SceneColorOffset = Inputs.SceneColorViewRect.Min;
+
+	if (Inputs.View != nullptr && GaussianSimVerse::RenderSettings::IsRenderDebugEnabled())
 	{
-		static bool bLoggedViewportTextureMismatchOnce = false;
-		if (!bLoggedViewportTextureMismatchOnce)
+		const FIntRect UnscaledViewRect = Inputs.View->UnscaledViewRect;
+		if (UnscaledViewRect.Size() != Inputs.SceneColorViewRect.Size())
 		{
-			bLoggedViewportTextureMismatchOnce = true;
-			UE_LOG(LogGaussianSimVerse, Log,
-				TEXT("GaussianSimVerse viewport/texture rect mismatch (expected with screen %%): viewport (%d,%d %dx%d) texture (%d,%d %dx%d)"),
-				Inputs.ViewData.ViewRect.Min.X, Inputs.ViewData.ViewRect.Min.Y,
-				Inputs.ViewData.ViewRect.Width(), Inputs.ViewData.ViewRect.Height(),
-				Inputs.SceneColorViewRect.Min.X, Inputs.SceneColorViewRect.Min.Y,
-				Inputs.SceneColorViewRect.Width(), Inputs.SceneColorViewRect.Height());
+			static bool bLoggedViewportTextureMismatchOnce = false;
+			if (!bLoggedViewportTextureMismatchOnce)
+			{
+				bLoggedViewportTextureMismatchOnce = true;
+				UE_LOG(LogGaussianSimVerse, Log,
+					TEXT("GaussianSimVerse using SceneColor rect for projection (UnscaledViewRect %dx%d != SceneColor %dx%d; common with screen %% / TSR)"),
+					UnscaledViewRect.Width(), UnscaledViewRect.Height(),
+					Inputs.SceneColorViewRect.Width(), Inputs.SceneColorViewRect.Height());
+			}
 		}
 	}
 
@@ -433,8 +464,8 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 	uint32 TotalRasterSplats = 0;
 
 	const uint32 TileSize = 16u;
-	const uint32 ViewWidth = static_cast<uint32>(FMath::Max(0, Inputs.SceneColorViewRect.Width()));
-	const uint32 ViewHeight = static_cast<uint32>(FMath::Max(0, Inputs.SceneColorViewRect.Height()));
+	const uint32 ViewWidth = static_cast<uint32>(OverlayExtent.X);
+	const uint32 ViewHeight = static_cast<uint32>(OverlayExtent.Y);
 	const uint32 NumTilesX = FMath::Max(1u, (ViewWidth + TileSize - 1u) / TileSize);
 	const uint32 NumTilesY = FMath::Max(1u, (ViewHeight + TileSize - 1u) / TileSize);
 	const uint32 NumTiles = NumTilesX * NumTilesY;
@@ -469,7 +500,7 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 				{
 					AdaptiveViewDistance = static_cast<float>(FVector::Dist(
 						Inputs.ViewData.ViewOrigin,
-						FVector(SceneProxy.Bounds.Origin)));
+						SceneProxy.LocalToWorld.GetOrigin()));
 					AdaptiveSceneBoundsRadius = FVector(SceneProxy.Bounds.Extent).Size();
 					bHaveAdaptiveSceneMetrics = true;
 					break;
@@ -555,7 +586,7 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 			{
 				ViewDistanceToScene = static_cast<float>(FVector::Dist(
 					Inputs.ViewData.ViewOrigin,
-					FVector(SceneProxy.Bounds.Origin)));
+					SceneProxy.LocalToWorld.GetOrigin()));
 				SceneBoundsRadius = FVector(SceneProxy.Bounds.Extent).Size();
 				break;
 			}
@@ -686,11 +717,16 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 			BlendParameters->GaussianMinSigmaPixels = GaussianMinSigmaPixels;
 			BlendParameters->MaxRasterRadius = MaxRasterRadius;
 			BlendParameters->bDebugOverlay = bDebugOverlay ? 1u : 0u;
+			BlendParameters->RenderShDegree = Binding.RenderShDegree;
+			BlendParameters->ImportedShDegree = Binding.ImportedShDegree;
+			BlendParameters->bHasShCoefficients = Binding.bHasShCoefficients;
+			BlendParameters->CameraWorldPosition = CameraWorldPosition;
 			BlendParameters->TileOffsets = TileOffsetsSRV;
 			BlendParameters->TileCounts = TileFillCounterSRV;
 			BlendParameters->TileSplats = TileSplatsSRV;
 			BlendParameters->SortedIndices = SortedIndicesSRV;
 			BlendParameters->GaussianSplatsVec4 = Binding.SplatSRV;
+			BlendParameters->GaussianShCoeffs = Binding.ShCoefficientsSRV ? Binding.ShCoefficientsSRV : DummyShCoefficientsSRV;
 			BlendParameters->RWOverlay = OverlayUAV;
 
 			FComputeShaderUtils::AddPass(
@@ -728,9 +764,14 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 				PassParameters->GaussianMinSigmaPixels = GaussianMinSigmaPixels;
 				PassParameters->MaxRasterRadius = MaxRasterRadius;
 				PassParameters->bDebugOverlay = bDebugOverlay ? 1u : 0u;
+				PassParameters->RenderShDegree = Binding.RenderShDegree;
+				PassParameters->ImportedShDegree = Binding.ImportedShDegree;
+				PassParameters->bHasShCoefficients = Binding.bHasShCoefficients;
+				PassParameters->CameraWorldPosition = CameraWorldPosition;
 				PassParameters->SortedIndices = SortedIndicesSRV;
 				PassParameters->VisibleCountBuffer = CullResult.VisibleCountSRV;
 				PassParameters->GaussianSplatsVec4 = Binding.SplatSRV;
+				PassParameters->GaussianShCoeffs = Binding.ShCoefficientsSRV ? Binding.ShCoefficientsSRV : DummyShCoefficientsSRV;
 				PassParameters->RWOverlay = OverlayUAV;
 
 				const uint32 NumGroups = FMath::DivideAndRoundUp(BatchCount, GaussianThreadGroupSize);
@@ -753,18 +794,21 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 		if (CompositeShader.IsValid())
 		{
 			// Scene color resolve textures are not created with UAV; composite to a scratch target then copy back.
-			FRDGTextureRef MergedTexture = GraphBuilder.CreateTexture(OverlayDesc, TEXT("Gaussian.MergedSceneColor"));
+			FRDGTextureDesc MergedDesc = SceneColorTexture->Desc;
+			MergedDesc.Flags |= ETextureCreateFlags::ShaderResource | ETextureCreateFlags::UAV;
+			FRDGTextureRef MergedTexture = GraphBuilder.CreateTexture(MergedDesc, TEXT("Gaussian.MergedSceneColor"));
 			FRDGTextureUAVRef MergedUAV = GraphBuilder.CreateUAV(MergedTexture);
 			AddCopyTexturePass(GraphBuilder, SceneColorTexture, MergedTexture);
 
 			FGaussianCompositeCS::FParameters* CompositeParams = GraphBuilder.AllocParameters<FGaussianCompositeCS::FParameters>();
 			CompositeParams->ViewRect = ViewRect;
+			CompositeParams->SceneColorOffset = SceneColorOffset;
 			CompositeParams->SceneColorTexture = SceneColorTexture;
 			CompositeParams->OverlayTexture = OverlayTexture;
 			CompositeParams->RWSceneColor = MergedUAV;
 
-			const uint32 GroupsX = FMath::DivideAndRoundUp(static_cast<uint32>(Inputs.SceneColorViewRect.Width()), 8u);
-			const uint32 GroupsY = FMath::DivideAndRoundUp(static_cast<uint32>(Inputs.SceneColorViewRect.Height()), 8u);
+			const uint32 GroupsX = FMath::DivideAndRoundUp(ViewWidth, 8u);
+			const uint32 GroupsY = FMath::DivideAndRoundUp(ViewHeight, 8u);
 			FComputeShaderUtils::AddPass(
 				GraphBuilder,
 				RDG_EVENT_NAME("GaussianSimVerse::Composite"),

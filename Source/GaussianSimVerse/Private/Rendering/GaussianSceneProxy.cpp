@@ -21,6 +21,7 @@ FGaussianSceneProxy::FGaussianSceneProxy(const UGaussianScene* InScene)
 	AlphaCullThreshold = InScene->AlphaCullThreshold;
 	CutoffK = InScene->CutoffK;
 	CovarianceDilation = InScene->CovarianceDilation;
+	ShBand = InScene->ShBand;
 
 	Chunks.Reserve(InScene->Chunks.Num());
 	uint32 ChunkIndex = 0;

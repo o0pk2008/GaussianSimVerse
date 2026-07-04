@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "GaussianTypes.h"
 #include "GaussianSceneActor.generated.h"
 
 class UGaussianAsset;
@@ -43,6 +44,9 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Rendering", meta = (ClampMin = "0.0", UIMin = "0.0", UIMax = "1.0"))
 	float CovarianceDilationOverride = 0.3f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Rendering", meta = (DisplayName = "SH Band"))
+	EGaussianSHBand ShBandOverride = EGaussianSHBand::SH3;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Gaussian")
 	TObjectPtr<UGaussianScene> GaussianScene;

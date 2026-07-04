@@ -71,6 +71,7 @@ void AGaussianSceneActor::OnConstruction(const FTransform& Transform)
 		GaussianScene->AlphaCullThreshold = AlphaCullThresholdOverride;
 		GaussianScene->CutoffK = CutoffKOverride;
 		GaussianScene->CovarianceDilation = CovarianceDilationOverride;
+		GaussianScene->ShBand = ShBandOverride;
 		UpdateBoundsVisual();
 
 		if (GaussianScene->IsRegisteredWithRenderer())
@@ -127,7 +128,8 @@ void AGaussianSceneActor::PostEditChangeProperty(FPropertyChangedEvent& Property
 	else if (PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, SplatScaleOverride)
 		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, AlphaCullThresholdOverride)
 		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, CutoffKOverride)
-		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, CovarianceDilationOverride))
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, CovarianceDilationOverride)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, ShBandOverride))
 	{
 		if (GaussianScene)
 		{
@@ -135,6 +137,7 @@ void AGaussianSceneActor::PostEditChangeProperty(FPropertyChangedEvent& Property
 			GaussianScene->AlphaCullThreshold = AlphaCullThresholdOverride;
 			GaussianScene->CutoffK = CutoffKOverride;
 			GaussianScene->CovarianceDilation = CovarianceDilationOverride;
+			GaussianScene->ShBand = ShBandOverride;
 			if (GaussianScene->IsRegisteredWithRenderer())
 			{
 				FGaussianRenderer::Get().MarkSceneDirty(GaussianScene);
@@ -197,6 +200,7 @@ void AGaussianSceneActor::RebuildGaussianScene()
 	GaussianScene->AlphaCullThreshold = AlphaCullThresholdOverride;
 	GaussianScene->CutoffK = CutoffKOverride;
 	GaussianScene->CovarianceDilation = CovarianceDilationOverride;
+	GaussianScene->ShBand = ShBandOverride;
 	GaussianScene->Chunks.Reset();
 
 	if (GaussianAsset && GaussianAsset->IsValidForRendering())
@@ -241,6 +245,7 @@ void AGaussianSceneActor::RegisterScene()
 	GaussianScene->AlphaCullThreshold = AlphaCullThresholdOverride;
 	GaussianScene->CutoffK = CutoffKOverride;
 	GaussianScene->CovarianceDilation = CovarianceDilationOverride;
+	GaussianScene->ShBand = ShBandOverride;
 	GaussianScene->RegisterWithRenderer();
 }
 

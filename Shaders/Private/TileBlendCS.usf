@@ -30,6 +30,11 @@ float GaussianCovarianceDilation;
 float GaussianMinSigmaPixels;
 uint MaxRasterRadius;
 uint bDebugOverlay;
+uint RenderShDegree;
+uint ImportedShDegree;
+uint bHasShCoefficients;
+float3 CameraWorldPosition;
+StructuredBuffer<float> GaussianShCoeffs;
 
 #ifndef GAUSSIAN_TILE_BLEND_BATCH
 #define GAUSSIAN_TILE_BLEND_BATCH 1024
@@ -92,7 +97,22 @@ bool BlendTileSplat(
 	}
 
 	float3 Color = Splat.Color.rgb;
-	if (bDebugOverlay != 0u)
+	if (bDebugOverlay == 0u)
+	{
+		const float3 WorldViewDir = ComputeGaussianWorldViewDir(
+			Splat.Position,
+			LocalToWorldMatrix,
+			CameraWorldPosition);
+		Color = EvaluateGaussianShRadiance(
+			GaussianShCoeffs,
+			GaussianIndex,
+			RenderShDegree,
+			ImportedShDegree,
+			bHasShCoefficients,
+			WorldViewDir,
+			Splat.Color.rgb);
+	}
+	else
 	{
 		Color = float3(1.0, 0.1, 0.8);
 	}

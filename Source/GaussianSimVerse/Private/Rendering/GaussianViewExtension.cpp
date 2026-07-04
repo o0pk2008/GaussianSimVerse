@@ -27,7 +27,7 @@ void FGaussianViewExtension::PreRenderViewFamily_RenderThread(FRDGBuilder& Graph
 
 void FGaussianViewExtension::PreRenderView_RenderThread(FRDGBuilder& GraphBuilder, FSceneView& InView)
 {
-	Renderer.CacheView_RenderThread(InView, InView.UnscaledViewRect);
+	Renderer.CacheView_RenderThread(InView, FGaussianRenderer::GetEffectiveViewRect(InView));
 }
 
 void FGaussianViewExtension::SubscribeToPostProcessingPass(

@@ -120,13 +120,40 @@ namespace GaussianPlyPrivate
 		return GaussianImport::PlyToUERotation(W, X, Y, Z);
 	}
 
+	static float DecodeCompressedShUChar(uint8 Value)
+	{
+		// SuperSplat / splat-transform: n in [0,1], coeff = (n - 0.5) * 8
+		const float N = (Value == 0) ? 0.0f : (Value == 255) ? 1.0f : (static_cast<float>(Value) + 0.5f) / 256.0f;
+		return (N - 0.5f) * 8.0f;
+	}
+
+	static int32 ShDegreeFromRestColumnCount(int32 NumRestColumns)
+	{
+		if (NumRestColumns >= 45)
+		{
+			return 3;
+		}
+		if (NumRestColumns >= 24)
+		{
+			return 2;
+		}
+		if (NumRestColumns >= 9)
+		{
+			return 1;
+		}
+		return 0;
+	}
+
 	static bool ReadCompressedBinaryPly(
 		const TArray<uint8>& FileBytes,
 		int32 HeaderEndOffset,
 		const FElement& ChunkElement,
 		const FElement& VertexElement,
+		const FElement* ShElement,
 		TArray<FGaussianSplatData>& OutSplats,
-		FString& OutError)
+		FString& OutError,
+		TArray<float>* OutShCoefficients,
+		int32* OutImportedShDegree)
 	{
 		if (!ChunkElement.Properties.IsValidIndex(17) || VertexElement.Properties.Num() < 4)
 		{
@@ -137,8 +164,9 @@ namespace GaussianPlyPrivate
 		const int32 BodyOffset = HeaderEndOffset;
 		const int32 ChunkBytes = ChunkElement.Count * ChunkElement.RecordSize;
 		const int32 VertexBytes = VertexElement.Count * VertexElement.RecordSize;
+		const int32 ShBytes = (ShElement && ShElement->Count > 0) ? ShElement->Count * ShElement->RecordSize : 0;
 
-		if (BodyOffset + ChunkBytes + VertexBytes > FileBytes.Num())
+		if (BodyOffset + ChunkBytes + VertexBytes + ShBytes > FileBytes.Num())
 		{
 			OutError = TEXT("Compressed PLY binary payload is truncated");
 			return false;
@@ -170,9 +198,44 @@ namespace GaussianPlyPrivate
 		}
 
 		const uint8* VertexData = ChunkData + ChunkBytes;
+		const uint8* ShData = VertexData + VertexBytes;
 		const int32 NumSplats = VertexElement.Count;
 		OutSplats.Reset();
 		OutSplats.Reserve(NumSplats);
+
+		const int32 NumShRestColumns = ShElement ? ShElement->Properties.Num() : 0;
+		const int32 ImportedShDegree = ShDegreeFromRestColumnCount(NumShRestColumns);
+		const bool bImportSh = OutShCoefficients != nullptr
+			&& ImportedShDegree > 0
+			&& ShElement != nullptr
+			&& ShElement->Count == NumSplats;
+
+		if (OutImportedShDegree)
+		{
+			*OutImportedShDegree = bImportSh ? ImportedShDegree : 0;
+		}
+		if (OutShCoefficients)
+		{
+			OutShCoefficients->Reset();
+			if (bImportSh)
+			{
+				OutShCoefficients->SetNumZeroed(NumSplats * GaussianShCoefficientsPerSplat);
+			}
+		}
+
+		if (ShElement && ShElement->Count > 0 && !bImportSh)
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("Compressed PLY has an SH element but it was skipped (count=%d splats=%d cols=%d)"),
+				ShElement->Count, NumSplats, NumShRestColumns);
+		}
+		else if (!ShElement || NumShRestColumns == 0)
+		{
+			UE_LOG(LogTemp, Log,
+				TEXT("Compressed PLY has no SH bands (SuperSplat often drops them). SH Band control will have no effect."));
+		}
+
+		const float InvShC0 = 1.0f / GaussianImport::SH_C0;
 
 		for (int32 SplatIndex = 0; SplatIndex < NumSplats; ++SplatIndex)
 		{
@@ -207,27 +270,77 @@ namespace GaussianPlyPrivate
 			const float Cb = static_cast<float>((PackedColor >> 8) & Mask8) * Inv255;
 			const float Co = static_cast<float>((PackedColor >> 0) & Mask8) * Inv255;
 
+			// Chunk scale bounds store log-scale (same as scale_0/1/2 in standard 3DGS PLY).
+			const float LogScaleX = FMath::Clamp(
+				Chunk.MinScaleX + Sx * (Chunk.MaxScaleX - Chunk.MinScaleX), -20.0f, 20.0f);
+			const float LogScaleY = FMath::Clamp(
+				Chunk.MinScaleY + Sy * (Chunk.MaxScaleY - Chunk.MinScaleY), -20.0f, 20.0f);
+			const float LogScaleZ = FMath::Clamp(
+				Chunk.MinScaleZ + Sz * (Chunk.MaxScaleZ - Chunk.MinScaleZ), -20.0f, 20.0f);
+
+			const float LinearR = FMath::Clamp(Chunk.MinR + Cr * (Chunk.MaxR - Chunk.MinR), 0.0f, 1.0f);
+			const float LinearG = FMath::Clamp(Chunk.MinG + Cg * (Chunk.MaxG - Chunk.MinG), 0.0f, 1.0f);
+			const float LinearB = FMath::Clamp(Chunk.MinB + Cb * (Chunk.MaxB - Chunk.MinB), 0.0f, 1.0f);
+
 			FGaussianSplatData Splat;
 			Splat.Position = GaussianImport::PlyToUEPosition(RawPos);
 			Splat.Scale = GaussianImport::PlyMetersToUEScale(FVector3f(
-				FMath::Max(Chunk.MinScaleX + Sx * (Chunk.MaxScaleX - Chunk.MinScaleX), KINDA_SMALL_NUMBER),
-				FMath::Max(Chunk.MinScaleY + Sy * (Chunk.MaxScaleY - Chunk.MinScaleY), KINDA_SMALL_NUMBER),
-				FMath::Max(Chunk.MinScaleZ + Sz * (Chunk.MaxScaleZ - Chunk.MinScaleZ), KINDA_SMALL_NUMBER)));
+				FMath::Exp(LogScaleX),
+				FMath::Exp(LogScaleY),
+				FMath::Exp(LogScaleZ)));
 			Splat.Rotation = DecodeCompressedQuaternion(PackedRotation);
-			Splat.Color = FVector4f(
-				FMath::Clamp(Chunk.MinR + Cr * (Chunk.MaxR - Chunk.MinR), 0.0f, 1.0f),
-				FMath::Clamp(Chunk.MinG + Cg * (Chunk.MaxG - Chunk.MinG), 0.0f, 1.0f),
-				FMath::Clamp(Chunk.MinB + Cb * (Chunk.MaxB - Chunk.MinB), 0.0f, 1.0f),
-				FMath::Clamp(Co, 0.0f, 1.0f));
+			Splat.Color = FVector4f(LinearR, LinearG, LinearB, FMath::Clamp(Co, 0.0f, 1.0f));
 			OutSplats.Add(Splat);
+
+			if (bImportSh && OutShCoefficients)
+			{
+				const int32 ShBase = (OutSplats.Num() - 1) * GaussianShCoefficientsPerSplat;
+				// Packed colors are linear RGB (= f_dc * SH_C0 + 0.5); recover f_dc for SH eval.
+				(*OutShCoefficients)[ShBase + 0] = (LinearR - 0.5f) * InvShC0;
+				(*OutShCoefficients)[ShBase + 1] = (LinearG - 0.5f) * InvShC0;
+				(*OutShCoefficients)[ShBase + 2] = (LinearB - 0.5f) * InvShC0;
+
+				const uint8* ShRecord = ShData + SplatIndex * ShElement->RecordSize;
+				int32 ByteOffset = 0;
+				const int32 RestToRead = FMath::Min(NumShRestColumns, GaussianShRestCoefficientCount);
+				for (int32 RestIndex = 0; RestIndex < RestToRead; ++RestIndex)
+				{
+					const FProperty& Prop = ShElement->Properties[RestIndex];
+					uint8 ByteValue = 0;
+					if (Prop.Type == EPropertyType::UChar && ByteOffset < ShElement->RecordSize)
+					{
+						ByteValue = ShRecord[ByteOffset];
+					}
+					ByteOffset += Prop.TypeSize;
+					(*OutShCoefficients)[ShBase + 3 + RestIndex] = DecodeCompressedShUChar(ByteValue);
+				}
+			}
+		}
+
+		if (OutShCoefficients && bImportSh)
+		{
+			OutShCoefficients->SetNum(OutSplats.Num() * GaussianShCoefficientsPerSplat, EAllowShrinking::No);
 		}
 
 		return OutSplats.Num() > 0;
 	}
 }
 
-bool FGaussianPlyReader::ReadFile(const FString& FilePath, TArray<FGaussianSplatData>& OutSplats, FString& OutError)
+bool FGaussianPlyReader::ReadFile(
+	const FString& FilePath,
+	TArray<FGaussianSplatData>& OutSplats,
+	FString& OutError,
+	TArray<float>* OutShCoefficients,
+	int32* OutImportedShDegree)
 {
+	if (OutShCoefficients)
+	{
+		OutShCoefficients->Reset();
+	}
+	if (OutImportedShDegree)
+	{
+		*OutImportedShDegree = 0;
+	}
 	TArray<uint8> FileBytes;
 	if (!FFileHelper::LoadFileToArray(FileBytes, *FilePath))
 	{
@@ -352,6 +465,7 @@ bool FGaussianPlyReader::ReadFile(const FString& FilePath, TArray<FGaussianSplat
 
 	const GaussianPlyPrivate::FElement* VertexElement = nullptr;
 	const GaussianPlyPrivate::FElement* ChunkElement = nullptr;
+	const GaussianPlyPrivate::FElement* ShElement = nullptr;
 	for (const GaussianPlyPrivate::FElement& Element : Elements)
 	{
 		if (Element.Name == TEXT("vertex"))
@@ -361,6 +475,10 @@ bool FGaussianPlyReader::ReadFile(const FString& FilePath, TArray<FGaussianSplat
 		else if (Element.Name == TEXT("chunk"))
 		{
 			ChunkElement = &Element;
+		}
+		else if (Element.Name == TEXT("sh"))
+		{
+			ShElement = &Element;
 		}
 	}
 
@@ -384,12 +502,23 @@ bool FGaussianPlyReader::ReadFile(const FString& FilePath, TArray<FGaussianSplat
 			return false;
 		}
 
-		if (!GaussianPlyPrivate::ReadCompressedBinaryPly(FileBytes, HeaderEndOffset, *ChunkElement, *VertexElement, OutSplats, OutError))
+		if (!GaussianPlyPrivate::ReadCompressedBinaryPly(
+			FileBytes,
+			HeaderEndOffset,
+			*ChunkElement,
+			*VertexElement,
+			ShElement,
+			OutSplats,
+			OutError,
+			OutShCoefficients,
+			OutImportedShDegree))
 		{
 			return false;
 		}
 
-		UE_LOG(LogTemp, Log, TEXT("Imported compressed SuperSplat PLY with %d Gaussians"), OutSplats.Num());
+		const int32 ShDegree = OutImportedShDegree ? *OutImportedShDegree : 0;
+		UE_LOG(LogTemp, Log, TEXT("Imported compressed SuperSplat PLY with %d Gaussians (SH degree %d)"),
+			OutSplats.Num(), ShDegree);
 		return true;
 	}
 
@@ -419,6 +548,29 @@ bool FGaussianPlyReader::ReadFile(const FString& FilePath, TArray<FGaussianSplat
 	const int32 IdxRot1 = GaussianPlyPrivate::FindPropertyIndex(VertexProperties, TEXT("rot_1"));
 	const int32 IdxRot2 = GaussianPlyPrivate::FindPropertyIndex(VertexProperties, TEXT("rot_2"));
 	const int32 IdxRot3 = GaussianPlyPrivate::FindPropertyIndex(VertexProperties, TEXT("rot_3"));
+
+	TArray<int32> IdxFRest;
+	IdxFRest.SetNum(GaussianShRestCoefficientCount);
+	for (int32 RestIndex = 0; RestIndex < GaussianShRestCoefficientCount; ++RestIndex)
+	{
+		IdxFRest[RestIndex] = GaussianPlyPrivate::FindPropertyIndex(
+			VertexProperties,
+			*FString::Printf(TEXT("f_rest_%d"), RestIndex));
+	}
+
+	int32 ImportedShDegree = 0;
+	if (IdxFRest[44] != INDEX_NONE)
+	{
+		ImportedShDegree = 3;
+	}
+	else if (IdxFRest[23] != INDEX_NONE)
+	{
+		ImportedShDegree = 2;
+	}
+	else if (IdxFRest[8] != INDEX_NONE)
+	{
+		ImportedShDegree = 1;
+	}
 
 	const bool bHasSH0Color = IdxFdc0 != INDEX_NONE && IdxFdc1 != INDEX_NONE && IdxFdc2 != INDEX_NONE;
 	const bool bHasRGBColor = IdxRed != INDEX_NONE && IdxGreen != INDEX_NONE && IdxBlue != INDEX_NONE;
@@ -455,6 +607,26 @@ bool FGaussianPlyReader::ReadFile(const FString& FilePath, TArray<FGaussianSplat
 
 	OutSplats.Reset();
 	OutSplats.Reserve(VertexCount);
+	if (OutShCoefficients && ImportedShDegree > 0)
+	{
+		OutShCoefficients->Reserve(VertexCount * GaussianShCoefficientsPerSplat);
+	}
+
+	auto AppendShCoefficients = [&](float Fdc0, float Fdc1, float Fdc2, TFunctionRef<float(int32)> GetRestValue)
+	{
+		if (!OutShCoefficients || ImportedShDegree <= 0)
+		{
+			return;
+		}
+
+		OutShCoefficients->Add(Fdc0);
+		OutShCoefficients->Add(Fdc1);
+		OutShCoefficients->Add(Fdc2);
+		for (int32 RestIndex = 0; RestIndex < GaussianShRestCoefficientCount; ++RestIndex)
+		{
+			OutShCoefficients->Add(GetRestValue(RestIndex));
+		}
+	};
 
 	auto GetPropertyValue = [&](const TArray<float>& Values, int32 Index, float DefaultValue) -> float
 	{
@@ -542,6 +714,14 @@ bool FGaussianPlyReader::ReadFile(const FString& FilePath, TArray<FGaussianSplat
 			Splat.Scale = GaussianImport::PlyMetersToUEScale(FVector3f(ScaleX, ScaleY, ScaleZ));
 			Splat.Rotation = GaussianImport::PlyToUERotation(RotW, RotX, RotY, RotZ);
 			Splat.Color = FVector4f(R, G, B, A);
+			AppendShCoefficients(
+				Fdc0,
+				Fdc1,
+				Fdc2,
+				[&](int32 RestIndex) -> float
+				{
+					return GetPropertyValue(Values, IdxFRest[RestIndex], 0.0f);
+				});
 			OutSplats.Add(Splat);
 			++VertexRead;
 		}
@@ -626,15 +806,23 @@ bool FGaussianPlyReader::ReadFile(const FString& FilePath, TArray<FGaussianSplat
 			Splat.Scale = GaussianImport::PlyMetersToUEScale(FVector3f(ScaleX, ScaleY, ScaleZ));
 			Splat.Rotation = GaussianImport::PlyToUERotation(RotW, RotX, RotY, RotZ);
 			Splat.Color = FVector4f(R, G, B, A);
+			AppendShCoefficients(
+				Fdc0,
+				Fdc1,
+				Fdc2,
+				[&](int32 RestIndex) -> float
+				{
+					return IdxFRest[RestIndex] != INDEX_NONE ? ReadProperty(VertexData, IdxFRest[RestIndex]) : 0.0f;
+				});
 			OutSplats.Add(Splat);
 		}
 	}
 
-	if (OutSplats.Num() == 0)
+	if (OutImportedShDegree)
 	{
-		OutError = TEXT("No Gaussians parsed from PLY");
-		return false;
+		*OutImportedShDegree = ImportedShDegree;
 	}
 
-	return true;
+	UE_LOG(LogTemp, Log, TEXT("Imported PLY with %d Gaussians (SH degree %d)"), OutSplats.Num(), ImportedShDegree);
+	return OutSplats.Num() > 0;
 }

@@ -113,12 +113,14 @@ bool FGaussianImporter::ImportFile(const FString& FilePath, UGaussianAsset* OutA
 
 	const FString Extension = FPaths::GetExtension(FilePath).ToLower();
 	TArray<FGaussianSplatData> Splats;
+	TArray<float> ShCoefficients;
+	int32 ImportedShDegree = 0;
 	bool bSuccess = false;
 	FString ExtractedDirectory;
 
 	if (Extension == TEXT("ply"))
 	{
-		bSuccess = FGaussianPlyReader::ReadFile(FilePath, Splats, OutError);
+		bSuccess = FGaussianPlyReader::ReadFile(FilePath, Splats, OutError, &ShCoefficients, &ImportedShDegree);
 		OutAsset->SourceFormat = EGaussianSourceFormat::PLY;
 	}
 	else if (Extension == TEXT("splat"))
@@ -143,7 +145,8 @@ bool FGaussianImporter::ImportFile(const FString& FilePath, UGaussianAsset* OutA
 	}
 
 	OutAsset->ImportSourcePath = FilePath;
-	OutAsset->SetStagingData(Splats);
+	const int32 ShCoefficientCount = ShCoefficients.Num();
+	OutAsset->SetStagingData(Splats, MoveTemp(ShCoefficients), ImportedShDegree);
 
 	const FGaussianImportStats ImportStats = BuildImportStats(Splats);
 
@@ -158,10 +161,12 @@ bool FGaussianImporter::ImportFile(const FString& FilePath, UGaussianAsset* OutA
 	UE_LOG(
 		LogTemp,
 		Log,
-		TEXT("Imported %d Gaussians from %s | Format=%d | Bounds Origin=(%.2f, %.2f, %.2f) Extent=(%.2f, %.2f, %.2f) | Alpha=[%.4f, %.4f] LowAlpha=%d | ScaleMin=(%.4f, %.4f, %.4f) ScaleMax=(%.4f, %.4f, %.4f)"),
+		TEXT("Imported %d Gaussians from %s | Format=%d | SH degree=%d (coeffs=%d) | Bounds Origin=(%.2f, %.2f, %.2f) Extent=(%.2f, %.2f, %.2f) | Alpha=[%.4f, %.4f] LowAlpha=%d | ScaleMin=(%.4f, %.4f, %.4f) ScaleMax=(%.4f, %.4f, %.4f)"),
 		Splats.Num(),
 		*FilePath,
 		static_cast<int32>(OutAsset->SourceFormat),
+		OutAsset->ImportedShDegree,
+		ShCoefficientCount,
 		OutAsset->Bounds.Origin.X, OutAsset->Bounds.Origin.Y, OutAsset->Bounds.Origin.Z,
 		OutAsset->Bounds.Extent.X, OutAsset->Bounds.Extent.Y, OutAsset->Bounds.Extent.Z,
 		ImportStats.MinAlpha, ImportStats.MaxAlpha, ImportStats.LowAlphaCount,

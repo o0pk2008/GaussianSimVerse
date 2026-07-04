@@ -34,6 +34,7 @@ struct GAUSSIANSIMVERSE_API FGaussianSceneProxy
 	float AlphaCullThreshold = 0.007843137f;
 	float CutoffK = 7.0f;
 	float CovarianceDilation = 0.3f;
+	EGaussianSHBand ShBand = EGaussianSHBand::SH3;
 	TArray<FGaussianChunkRenderData> Chunks;
 };
 

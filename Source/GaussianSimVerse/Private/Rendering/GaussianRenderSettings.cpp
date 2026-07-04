@@ -81,7 +81,9 @@ namespace GaussianSimVerse::RenderSettings
 	TAutoConsoleVariable<int32> CVarMaxSortElements(
 		TEXT("r.GaussianSimVerse.MaxSortElements"),
 		262144,
-		TEXT("Maximum Gaussians per chunk for GPU bitonic sort (padded to power of two)."),
+		TEXT("Maximum Gaussians per chunk for GPU bitonic sort (padded to power of two).\n")
+		TEXT("Chunks larger than this skip sorting and rasterize all splats unsorted\n")
+		TEXT("(avoids partial Morton-order fragments on large SuperSplat PLYs)."),
 		ECVF_RenderThreadSafe | ECVF_Scalability);
 
 	TAutoConsoleVariable<int32> CVarMaxScenesPerView(
@@ -114,11 +116,11 @@ namespace GaussianSimVerse::RenderSettings
 
 	TAutoConsoleVariable<int32> CVarUseTileRaster(
 		TEXT("r.GaussianSimVerse.UseTileRaster"),
-		1,
+		2,
 		TEXT("Rasterization strategy:\n")
 		TEXT("0: Always global per-splat raster (no tile seams; slow when close)\n")
-		TEXT("1: Tile raster + TileSort + multi-batch blend (default)\n")
-		TEXT("2: Adaptive — tile when close/medium, global when far"),
+		TEXT("1: Tile raster + TileSort + multi-batch blend (global fallback when far)\n")
+		TEXT("2: Adaptive — tile when close/medium, global when far (default)"),
 		ECVF_RenderThreadSafe | ECVF_Scalability);
 
 	TAutoConsoleVariable<float> CVarAdaptiveFarViewRatio(

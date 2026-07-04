@@ -20,6 +20,9 @@ class GAUSSIANSIMVERSE_API FGaussianRenderer
 public:
 	static FGaussianRenderer& Get();
 
+	/** FViewInfo::ViewRect when available; falls back to UnscaledViewRect on FSceneView. */
+	static FIntRect GetEffectiveViewRect(const FSceneView& View);
+
 	void Initialize();
 	void Shutdown();
 

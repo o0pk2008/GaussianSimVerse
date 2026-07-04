@@ -4,6 +4,35 @@
 
 namespace GaussianImport
 {
+	namespace Private
+	{
+		/**
+		 * Authoring (Transform.PLY / SuperSplat) -> UE linear map:
+		 *   (x, y, z) -> (-x, -z, -y)
+		 * UE.Z = -Y maps authoring -Y-up to UE +Z-up.
+		 * Position and rotation MUST use this same basis or ellipsoids shear wrong.
+		 */
+		FVector3f AuthoringToUeVector(const FVector3f& V)
+		{
+			return FVector3f(-V.X, -V.Z, -V.Y);
+		}
+
+		const FQuat& GetAuthoringToUeQuat()
+		{
+			// Images of authoring basis axes under AuthoringToUeVector.
+			static const FQuat Quat = []()
+			{
+				const FVector XAxis(-1.0, 0.0, 0.0); // +X -> -X
+				const FVector YAxis(0.0, 0.0, -1.0); // +Y -> -Z
+				const FVector ZAxis(0.0, -1.0, 0.0); // +Z -> -Y
+				FMatrix Basis = FMatrix::Identity;
+				Basis.SetAxes(&XAxis, &YAxis, &ZAxis);
+				return FQuat(Basis).GetNormalized();
+			}();
+			return Quat;
+		}
+	}
+
 	float Sigmoid(float X)
 	{
 		return 1.0f / (1.0f + FMath::Exp(-X));
@@ -24,66 +53,45 @@ namespace GaussianImport
 
 	FVector3f PlayCanvasToUEPosition(const FVector3f& Position)
 	{
-		// PlayCanvas (X right, Y up, Z backward) -> UE (X forward, Y right, Z up).
-		// Negate PlayCanvas Y so the splat cloud is not vertically flipped in UE.
-		return FVector3f(Position.X, -Position.Z, -Position.Y) * MetersToCentimeters;
+		return Private::AuthoringToUeVector(Position) * MetersToCentimeters;
 	}
 
 	FVector3f MetersToUEScale(const FVector3f& Scale)
 	{
-		// PlayCanvas / SOG: rotation is converted via PlayCanvasToUERotation; only convert units.
+		// Local scale axes are carried by the converted quaternion; only convert units.
 		return Scale * MetersToCentimeters;
 	}
 
 	FVector4f PlayCanvasToUERotation(float W, float X, float Y, float Z)
 	{
-		const FVector4f PlayCanvasQuat(X, Y, Z, W);
-		const FQuat4f QPlayCanvas(PlayCanvasQuat.X, PlayCanvasQuat.Y, PlayCanvasQuat.Z, PlayCanvasQuat.W);
-
-		const FQuat4f YUpToZUp = FQuat4f(FVector3f(1.0f, 0.0f, 0.0f), -PI * 0.5f);
-		const FQuat4f FlipVertical = FQuat4f(FVector3f(0.0f, 1.0f, 0.0f), PI);
-		const FQuat4f QUnreal = FlipVertical * YUpToZUp * QPlayCanvas;
-		return FVector4f(QUnreal.X, QUnreal.Y, QUnreal.Z, QUnreal.W);
+		// Same left-multiply as splat-transform: Q_ue = Q_basis * Q_src.
+		const FQuat QSrc(X, Y, Z, W);
+		const FQuat QUe = (Private::GetAuthoringToUeQuat() * QSrc).GetNormalized();
+		return FVector4f(QUe.X, QUe.Y, QUe.Z, QUe.W);
 	}
 
 	FVector3f PlyToUEPosition(const FVector3f& Position)
 	{
-		// Standard 3DGS PLY exports typically follow a COLMAP-like basis.
-		// Map source (x, y, z) -> UE (forward, right, up) as (z, x, -y).
-		return FVector3f(Position.Z, Position.X, -Position.Y) * MetersToCentimeters;
+		// PLY and SOG share Transform.PLY in SuperSplat. The editor's entity Z-180 is
+		// only for PlayCanvas +Y-up display — do not bake it into vertex data.
+		// Use the same PlayCanvas->UE map as SOG.
+		return PlayCanvasToUEPosition(Position);
 	}
 
 	FVector3f PlyToUEDirection(const FVector3f& Direction)
 	{
-		return FVector3f(Direction.Z, Direction.X, -Direction.Y);
-	}
-
-	namespace GaussianImportPrivate
-	{
-		// Right-handed basis for PLY RDF -> UE (X forward, Y right, Z up).
-		// Maps COLMAP +X -> UE +Y, +Y -> UE -Z, +Z -> UE +X.
-		const FQuat PlyBasisToUeQuat = []() -> FQuat
-		{
-			FVector XAxis(0.0, 1.0, 0.0);
-			FVector YAxis(0.0, 0.0, -1.0);
-			FVector ZAxis(-1.0, 0.0, 0.0);
-			FMatrix Basis = FMatrix::Identity;
-			Basis.SetAxes(&XAxis, &YAxis, &ZAxis, nullptr);
-			return FQuat(Basis);
-		}();
+		return Private::AuthoringToUeVector(Direction);
 	}
 
 	FVector4f PlyToUERotation(float W, float X, float Y, float Z)
 	{
-		const FQuat PlyQuat(X, Y, Z, W);
-		const FQuat UeQuat = (GaussianImportPrivate::PlyBasisToUeQuat * PlyQuat).GetNormalized();
-		return FVector4f(UeQuat.X, UeQuat.Y, UeQuat.Z, UeQuat.W);
+		return PlayCanvasToUERotation(W, X, Y, Z);
 	}
 
 	FVector3f PlyMetersToUEScale(const FVector3f& Scale)
 	{
-		// Rotation already maps PLY principal axes into UE space; only convert units.
-		return Scale * MetersToCentimeters;
+		// Local scale axes are carried by the converted quaternion; only convert units.
+		return MetersToUEScale(Scale);
 	}
 
 	FVector4f SH0ToLinearColor(float Fdc0, float Fdc1, float Fdc2, float Opacity)

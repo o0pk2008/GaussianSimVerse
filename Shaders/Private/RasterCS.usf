@@ -22,10 +22,15 @@ float GaussianCovarianceDilation;
 float GaussianMinSigmaPixels;
 uint MaxRasterRadius;
 uint bDebugOverlay;
+uint RenderShDegree;
+uint ImportedShDegree;
+uint bHasShCoefficients;
+float3 CameraWorldPosition;
 
 StructuredBuffer<uint> SortedIndices;
 StructuredBuffer<uint> VisibleCountBuffer;
 StructuredBuffer<float4> GaussianSplatsVec4;
+StructuredBuffer<float> GaussianShCoeffs;
 RWTexture2D<float4> RWOverlay;
 
 void BlendPremul(int2 Pixel, float3 Color, float Alpha)
@@ -108,7 +113,18 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 			if (bDebugOverlay == 0u)
 			{
 				Alpha = EvaluateSplatAlphaEllipse(float2(X, Y) + 0.5, ScreenCenter, InvConic, EffectiveOpacity, GaussianCutoffK, bDebugOverlay);
-				Color = Splat.Color.rgb;
+				const float3 WorldViewDir = ComputeGaussianWorldViewDir(
+					Splat.Position,
+					LocalToWorldMatrix,
+					CameraWorldPosition);
+				Color = EvaluateGaussianShRadiance(
+					GaussianShCoeffs,
+					GaussianIndex,
+					RenderShDegree,
+					ImportedShDegree,
+					bHasShCoefficients,
+					WorldViewDir,
+					Splat.Color.rgb);
 				if (Alpha < GaussianAlphaCutoff)
 				{
 					continue;

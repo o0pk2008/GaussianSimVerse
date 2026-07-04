@@ -44,6 +44,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Gaussian|Rendering")
 	float CovarianceDilation = 0.3f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Rendering", meta = (DisplayName = "SH Band"))
+	EGaussianSHBand ShBand = EGaussianSHBand::SH3;
+
 	uint32 GetTotalGaussianCount() const;
 	FGaussianBounds GetCombinedBounds() const;
 	bool IsRegisteredWithRenderer() const { return bRegisteredWithRenderer; }

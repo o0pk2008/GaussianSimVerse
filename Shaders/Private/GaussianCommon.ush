@@ -211,6 +211,125 @@ FGaussianSplatGPU LoadGaussianSplat(StructuredBuffer<float4> GaussianSplatsVec4,
 	return Splat;
 }
 
+static const float GaussianSh_C0 = 0.28209479177387814f;
+static const float GaussianSh_C1 = 0.4886025119029199f;
+static const float GaussianSh_C2[5] = { 1.0925484, -1.0925484, 0.3153916, -1.0925484, 0.5462742 };
+static const float GaussianSh_C3[7] = {
+	-0.5900435899266435f, 2.890611442640554f, -0.4570457994644658f, 0.3731763325901154f,
+	-0.4570457994644658f, 1.445305721320277f, -0.5900435899266435f
+};
+
+float LoadGaussianShCoeff(StructuredBuffer<float> GaussianShCoeffs, uint GaussianIndex, uint CoeffIndex)
+{
+	return GaussianShCoeffs[GaussianIndex * 48u + CoeffIndex];
+}
+
+float3 LoadGaussianShRestVec3(StructuredBuffer<float> GaussianShCoeffs, uint GaussianIndex, uint RestVecIndex)
+{
+	const uint Base = 3u + RestVecIndex * 3u;
+	return float3(
+		LoadGaussianShCoeff(GaussianShCoeffs, GaussianIndex, Base + 0u),
+		LoadGaussianShCoeff(GaussianShCoeffs, GaussianIndex, Base + 1u),
+		LoadGaussianShCoeff(GaussianShCoeffs, GaussianIndex, Base + 2u));
+}
+
+/** Inverse of PlayCanvas/PLY->UE direction (-x,-z,-y); SH coeffs stay in source PLY basis. */
+float3 UeToPlyDirection(float3 UeDir)
+{
+	// UE = (-plyX, -plyZ, -plyY)  =>  PLY = (-ueX, -ueZ, -ueY)
+	return normalize(float3(-UeDir.x, -UeDir.z, -UeDir.y));
+}
+
+float3 EvaluateGaussianShRadiance(
+	StructuredBuffer<float> GaussianShCoeffs,
+	uint GaussianIndex,
+	uint RenderShDegree,
+	uint ImportedShDegree,
+	uint bHasShCoefficients,
+	float3 WorldViewDir,
+	float3 FallbackLinearRgb)
+{
+	const uint Degree = min(RenderShDegree, ImportedShDegree);
+	if (bHasShCoefficients == 0u || Degree == 0u)
+	{
+		return FallbackLinearRgb;
+	}
+
+	WorldViewDir = UeToPlyDirection(WorldViewDir);
+
+	const float3 ShDc = float3(
+		LoadGaussianShCoeff(GaussianShCoeffs, GaussianIndex, 0u),
+		LoadGaussianShCoeff(GaussianShCoeffs, GaussianIndex, 1u),
+		LoadGaussianShCoeff(GaussianShCoeffs, GaussianIndex, 2u));
+
+	float3 rgb = GaussianSh_C0 * ShDc + 0.5;
+
+	if (Degree >= 1u)
+	{
+		const float3 shd1_0 = LoadGaussianShRestVec3(GaussianShCoeffs, GaussianIndex, 0u);
+		const float3 shd1_1 = LoadGaussianShRestVec3(GaussianShCoeffs, GaussianIndex, 1u);
+		const float3 shd1_2 = LoadGaussianShRestVec3(GaussianShCoeffs, GaussianIndex, 2u);
+
+		const float x = WorldViewDir.x;
+		const float y = WorldViewDir.y;
+		const float z = WorldViewDir.z;
+
+		rgb += GaussianSh_C1 * (-shd1_0 * y + shd1_1 * z - shd1_2 * x);
+
+		if (Degree >= 2u)
+		{
+			const float xx = x * x;
+			const float yy = y * y;
+			const float zz = z * z;
+			const float xy = x * y;
+			const float yz = y * z;
+			const float xz = x * z;
+
+			const float3 shd2_0 = LoadGaussianShRestVec3(GaussianShCoeffs, GaussianIndex, 3u);
+			const float3 shd2_1 = LoadGaussianShRestVec3(GaussianShCoeffs, GaussianIndex, 4u);
+			const float3 shd2_2 = LoadGaussianShRestVec3(GaussianShCoeffs, GaussianIndex, 5u);
+			const float3 shd2_3 = LoadGaussianShRestVec3(GaussianShCoeffs, GaussianIndex, 6u);
+			const float3 shd2_4 = LoadGaussianShRestVec3(GaussianShCoeffs, GaussianIndex, 7u);
+
+			rgb += (GaussianSh_C2[0] * xy) * shd2_0
+				+ (GaussianSh_C2[1] * yz) * shd2_1
+				+ (GaussianSh_C2[2] * (2.0 * zz - xx - yy)) * shd2_2
+				+ (GaussianSh_C2[3] * xz) * shd2_3
+				+ (GaussianSh_C2[4] * (xx - yy)) * shd2_4;
+
+			if (Degree >= 3u)
+			{
+				const float3 shd3_0 = LoadGaussianShRestVec3(GaussianShCoeffs, GaussianIndex, 8u);
+				const float3 shd3_1 = LoadGaussianShRestVec3(GaussianShCoeffs, GaussianIndex, 9u);
+				const float3 shd3_2 = LoadGaussianShRestVec3(GaussianShCoeffs, GaussianIndex, 10u);
+				const float3 shd3_3 = LoadGaussianShRestVec3(GaussianShCoeffs, GaussianIndex, 11u);
+				const float3 shd3_4 = LoadGaussianShRestVec3(GaussianShCoeffs, GaussianIndex, 12u);
+				const float3 shd3_5 = LoadGaussianShRestVec3(GaussianShCoeffs, GaussianIndex, 13u);
+				const float3 shd3_6 = LoadGaussianShRestVec3(GaussianShCoeffs, GaussianIndex, 14u);
+
+				rgb += GaussianSh_C3[0] * shd3_0 * (3.0 * x * x - y * y) * y
+					+ GaussianSh_C3[1] * shd3_1 * x * y * z
+					+ GaussianSh_C3[2] * shd3_2 * (4.0 * z * z - x * x - y * y) * y
+					+ GaussianSh_C3[3] * shd3_3 * z * (2.0 * z * z - 3.0 * x * x - 3.0 * y * y)
+					+ GaussianSh_C3[4] * shd3_4 * x * (4.0 * z * z - x * x - y * y)
+					+ GaussianSh_C3[5] * shd3_5 * (x * x - y * y) * z
+					+ GaussianSh_C3[6] * shd3_6 * x * (x * x - 3.0 * y * y);
+			}
+		}
+	}
+
+	return max(rgb, 0.0);
+}
+
+float3 ComputeGaussianWorldViewDir(
+	float3 LocalSplatPosition,
+	float4x4 LocalToWorldMatrix,
+	float3 CameraWorldPosition)
+{
+	const float3 WorldPosition = mul(float4(LocalSplatPosition, 1.0), LocalToWorldMatrix).xyz;
+	return normalize(WorldPosition - CameraWorldPosition);
+}
+
 float3x3 QuatToMat3(float4 Q)
 {
 	const float4 N = normalize(Q);
