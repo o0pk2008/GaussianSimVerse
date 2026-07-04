@@ -160,6 +160,10 @@ void MainCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupThreadID)
 		for (uint SplatSlot = 0u; SplatSlot < BatchCount; ++SplatSlot)
 		{
 			const uint2 Entry = TileSplats[SplatStart + BatchOffset + SplatSlot];
+			if (Entry.y == 0xFFFFFFFFu)
+			{
+				continue;
+			}
 			BlendTileSplat(PixelCenter, Entry.y, AccumRgb, Transmittance);
 			if (Transmittance < GaussianAlphaCutoff)
 			{
@@ -176,6 +180,8 @@ void MainCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupThreadID)
 	const float Coverage = saturate(1.0 - Transmittance);
 	if (Coverage > GaussianAlphaCutoff)
 	{
+		// Premultiplied RGB must not exceed coverage (prevents washed-out HDR blowout).
+		AccumRgb = min(AccumRgb, Coverage.xxx);
 		const float4 Existing = RWOverlay[Pixel];
 		const float3 OutRgb = AccumRgb + Existing.rgb * (1.0 - Coverage);
 		const float OutAlpha = Coverage + Existing.a * (1.0 - Coverage);

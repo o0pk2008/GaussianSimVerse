@@ -1,0 +1,23 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+// 4-bit digit histogram for GPU radix sort (inspired by 3DGS.cpp / VkRadixSort).
+
+#include "/Engine/Public/Platform.ush"
+
+StructuredBuffer<uint2> SortKeys;
+RWStructuredBuffer<uint> RWHistogram;
+
+uint ElementCount;
+uint DigitShift;
+
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	const uint Index = DispatchThreadId.x;
+	if (Index >= ElementCount)
+	{
+		return;
+	}
+
+	const uint Digit = (SortKeys[Index].x >> DigitShift) & 0xFu;
+	InterlockedAdd(RWHistogram[Digit], 1u);
+}

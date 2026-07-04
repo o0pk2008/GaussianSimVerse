@@ -20,7 +20,7 @@ struct GAUSSIANSIMVERSE_API FGaussianRDGBufferBinding
 	uint32 SceneId = INDEX_NONE;
 	uint32 ChunkIndex = INDEX_NONE;
 	FMatrix LocalToWorld = FMatrix::Identity;
-	float SplatScale = 1.5f;
+	float SplatScale = 1.0f;
 	float AlphaCullThreshold = 0.007843137f;
 	float CutoffK = 7.0f;
 	float CovarianceDilation = 0.3f;

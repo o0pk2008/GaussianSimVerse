@@ -34,7 +34,7 @@ public:
 	bool bEnableRendering = true;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Rendering", meta = (ClampMin = "0.1", UIMin = "0.1", UIMax = "4.0"))
-	float SplatScaleOverride = 1.5f;
+	float SplatScaleOverride = 1.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Rendering", meta = (ClampMin = "0.0", ClampMax = "1.0", UIMin = "0.0", UIMax = "0.05"))
 	float AlphaCullThresholdOverride = 0.007843137f;

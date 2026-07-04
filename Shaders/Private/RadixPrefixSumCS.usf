@@ -1,0 +1,25 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+// Exclusive prefix sum over 16 radix bins + reset scatter bases.
+
+#include "/Engine/Public/Platform.ush"
+
+StructuredBuffer<uint> Histogram;
+RWStructuredBuffer<uint> RWScatterBase;
+
+[numthreads(1, 1, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	if (DispatchThreadId.x != 0u)
+	{
+		return;
+	}
+
+	uint Running = 0u;
+	[unroll]
+	for (uint Digit = 0u; Digit < 16u; ++Digit)
+	{
+		const uint Count = Histogram[Digit];
+		RWScatterBase[Digit] = Running;
+		Running += Count;
+	}
+}

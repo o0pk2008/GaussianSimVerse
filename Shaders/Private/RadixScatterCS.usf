@@ -1,0 +1,27 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+// Stable-ish scatter for one 4-bit radix digit (atomic offsets per bin).
+
+#include "/Engine/Public/Platform.ush"
+
+StructuredBuffer<uint2> SortKeysIn;
+RWStructuredBuffer<uint> RWScatterBase;
+RWStructuredBuffer<uint2> RWSortKeysOut;
+
+uint ElementCount;
+uint DigitShift;
+
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	const uint Index = DispatchThreadId.x;
+	if (Index >= ElementCount)
+	{
+		return;
+	}
+
+	const uint2 Item = SortKeysIn[Index];
+	const uint Digit = (Item.x >> DigitShift) & 0xFu;
+	uint Dest = 0u;
+	InterlockedAdd(RWScatterBase[Digit], 1u, Dest);
+	RWSortKeysOut[Dest] = Item;
+}

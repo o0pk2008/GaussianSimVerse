@@ -30,7 +30,7 @@ struct GAUSSIANSIMVERSE_API FGaussianSceneProxy
 	FGaussianBounds Bounds;
 	uint32 TotalGaussianCount = 0;
 	bool bEnableRendering = true;
-	float SplatScale = 1.5f;
+	float SplatScale = 1.0f;
 	float AlphaCullThreshold = 0.007843137f;
 	float CutoffK = 7.0f;
 	float CovarianceDilation = 0.3f;

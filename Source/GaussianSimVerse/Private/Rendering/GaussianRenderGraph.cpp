@@ -93,7 +93,8 @@ void FGaussianRenderGraph::AddGPUBufferUploadPasses(
 			Binding.SceneId = SceneProxy.SceneId;
 			Binding.ChunkIndex = Chunk.ChunkIndex;
 			Binding.LocalToWorld = Chunk.LocalToWorld;
-			Binding.SplatScale = SceneProxy.SplatScale;
+			// Actor scale * global CVar (default 1.0 matches SuperSplat footprint).
+			Binding.SplatScale = SceneProxy.SplatScale * GaussianSimVerse::RenderSettings::GetSplatScale();
 			Binding.AlphaCullThreshold = SceneProxy.AlphaCullThreshold;
 			Binding.CutoffK = SceneProxy.CutoffK;
 			Binding.CovarianceDilation = SceneProxy.CovarianceDilation;
@@ -251,7 +252,19 @@ void FGaussianRenderGraph::AddGPUDepthSortPasses(
 	const TShaderMapRef<FGaussianSortKeysCS> SortKeysShader(GlobalShaderMap);
 	const TShaderMapRef<FGaussianBitonicSortCS> BitonicShader(GlobalShaderMap);
 	const TShaderMapRef<FGaussianSortExtractCS> ExtractShader(GlobalShaderMap);
-	if (!SortKeysShader.IsValid() || !BitonicShader.IsValid() || !ExtractShader.IsValid())
+	const TShaderMapRef<FGaussianRadixCountCS> RadixCountShader(GlobalShaderMap);
+	const TShaderMapRef<FGaussianRadixPrefixSumCS> RadixPrefixShader(GlobalShaderMap);
+	const TShaderMapRef<FGaussianRadixScatterCS> RadixScatterShader(GlobalShaderMap);
+	if (!SortKeysShader.IsValid() || !ExtractShader.IsValid())
+	{
+		return;
+	}
+
+	const bool bRadixAvailable = RadixCountShader.IsValid() && RadixPrefixShader.IsValid() && RadixScatterShader.IsValid();
+	const bool bBitonicAvailable = BitonicShader.IsValid();
+	const int32 SortMethod = GaussianSimVerse::RenderSettings::GetSortMethod();
+	const bool bUseRadix = (SortMethod == 1) && bRadixAvailable;
+	if (!bUseRadix && !bBitonicAvailable)
 	{
 		return;
 	}
@@ -269,9 +282,6 @@ void FGaussianRenderGraph::AddGPUDepthSortPasses(
 		const FGaussianRDGBufferBinding& Binding = TransientResources.GPUBuffers[CullResult.GPUBindingIndex];
 		const uint32 MaxVisibleCount = CullResult.MaxVisibleCount;
 		const int32 MaxSortElements = FMath::Max(2, GaussianSimVerse::RenderSettings::CVarMaxSortElements.GetValueOnRenderThread());
-		// Bitonic sort only fills min(count, MaxSortElements) keys. If we still rasterize the
-		// full count, SortedIndices beyond that are uninitialized — Morton-ordered SuperSplat
-		// PLY then shows only one spatial fragment (e.g. upper-left of the body).
 		if (MaxVisibleCount > static_cast<uint32>(MaxSortElements))
 		{
 			static bool bLoggedSortSkipOnce = false;
@@ -279,14 +289,18 @@ void FGaussianRenderGraph::AddGPUDepthSortPasses(
 			{
 				bLoggedSortSkipOnce = true;
 				UE_LOG(LogGaussianSimVerse, Warning,
-					TEXT("GaussianSimVerse: skipping depth sort for %u splats (limit %d). Full cloud will render unsorted. Raise r.GaussianSimVerse.MaxSortElements to sort large PLYs."),
+					TEXT("GaussianSimVerse: skipping depth sort for %u splats (limit %d). Raise r.GaussianSimVerse.MaxSortElements."),
 					MaxVisibleCount, MaxSortElements);
 			}
 			continue;
 		}
 
-		const uint32 PaddedCount = GaussianRenderGraphPrivate::GetPaddedSortCount(MaxVisibleCount);
-		if (PaddedCount < 2)
+		// Radix sorts exactly N elements (no power-of-two pad). Bitonic still needs pot padding.
+		const uint32 ElementCount = MaxVisibleCount;
+		const uint32 KeyBufferCount = bUseRadix
+			? ElementCount
+			: GaussianRenderGraphPrivate::GetPaddedSortCount(ElementCount);
+		if (KeyBufferCount < 1)
 		{
 			continue;
 		}
@@ -296,16 +310,20 @@ void FGaussianRenderGraph::AddGPUDepthSortPasses(
 		const FMatrix44f TranslatedViewMatrix(Inputs.ViewData.TranslatedViewMatrix);
 		const FMatrix44f TranslatedWorldToClip(Inputs.ViewData.TranslatedWorldToClip);
 
-		FRDGBufferRef SortKeysBuffer = GraphBuilder.CreateBuffer(
-			FRDGBufferDesc::CreateStructuredDesc(sizeof(FUintVector2), PaddedCount),
-			*FString::Printf(TEXT("Gaussian.SortKeys.S%d.C%d"), Binding.SceneId, Binding.ChunkIndex));
+		FRDGBufferRef SortKeysA = GraphBuilder.CreateBuffer(
+			FRDGBufferDesc::CreateStructuredDesc(sizeof(FUintVector2), KeyBufferCount),
+			*FString::Printf(TEXT("Gaussian.SortKeysA.S%d.C%d"), Binding.SceneId, Binding.ChunkIndex));
+		FRDGBufferRef SortKeysB = bUseRadix
+			? GraphBuilder.CreateBuffer(
+				FRDGBufferDesc::CreateStructuredDesc(sizeof(FUintVector2), KeyBufferCount),
+				*FString::Printf(TEXT("Gaussian.SortKeysB.S%d.C%d"), Binding.SceneId, Binding.ChunkIndex))
+			: nullptr;
 
 		FRDGBufferRef SortedIndicesBuffer = GraphBuilder.CreateBuffer(
 			FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), MaxVisibleCount),
 			*FString::Printf(TEXT("Gaussian.SortedIndices.S%d.C%d"), Binding.SceneId, Binding.ChunkIndex));
 
-		FRDGBufferUAVRef SortKeysUAV = GraphBuilder.CreateUAV(SortKeysBuffer);
-
+		FRDGBufferUAVRef SortKeysAUAV = GraphBuilder.CreateUAV(SortKeysA);
 		{
 			FGaussianSortKeysCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FGaussianSortKeysCS::FParameters>();
 			PassParameters->LocalToWorldMatrix = LocalToWorldMatrix;
@@ -313,13 +331,13 @@ void FGaussianRenderGraph::AddGPUDepthSortPasses(
 			PassParameters->TranslatedViewMatrix = TranslatedViewMatrix;
 			PassParameters->TranslatedWorldToClip = TranslatedWorldToClip;
 			PassParameters->MaxVisibleCount = MaxVisibleCount;
-			PassParameters->PaddedCount = PaddedCount;
+			PassParameters->PaddedCount = KeyBufferCount;
 			PassParameters->VisibleIndices = CullResult.VisibleIndicesSRV;
 			PassParameters->VisibleCountBuffer = CullResult.VisibleCountSRV;
 			PassParameters->GaussianPositions = Binding.PositionSRV;
-			PassParameters->RWSortKeys = SortKeysUAV;
+			PassParameters->RWSortKeys = SortKeysAUAV;
 
-			const uint32 NumGroups = FMath::DivideAndRoundUp(PaddedCount, GaussianThreadGroupSize);
+			const uint32 NumGroups = FMath::DivideAndRoundUp(KeyBufferCount, GaussianThreadGroupSize);
 			FComputeShaderUtils::AddPass(
 				GraphBuilder,
 				RDG_EVENT_NAME("GaussianSimVerse::SortKeys S%u C%u", Binding.SceneId, Binding.ChunkIndex),
@@ -329,39 +347,116 @@ void FGaussianRenderGraph::AddGPUDepthSortPasses(
 				FIntVector(NumGroups, 1, 1));
 		}
 
-		for (uint32 K = 2; K <= PaddedCount; K <<= 1)
-		{
-			for (uint32 J = K >> 1; J > 0; J >>= 1)
-			{
-				FGaussianBitonicSortCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FGaussianBitonicSortCS::FParameters>();
-				PassParameters->K = K;
-				PassParameters->J = J;
-				PassParameters->PaddedCount = PaddedCount;
-				PassParameters->RWSortKeys = SortKeysUAV;
+		FRDGBufferRef SortedKeysBuffer = SortKeysA;
 
-				const uint32 NumGroups = FMath::DivideAndRoundUp(PaddedCount, GaussianThreadGroupSize);
-				FComputeShaderUtils::AddPass(
-					GraphBuilder,
-					RDG_EVENT_NAME("GaussianSimVerse::BitonicSort K%u J%u", K, J),
-					ERDGPassFlags::Compute,
-					BitonicShader,
-					PassParameters,
-					FIntVector(NumGroups, 1, 1));
+		if (bUseRadix)
+		{
+			// 8 passes x 4-bit digits over 32-bit depth keys (3DGS.cpp-style radix).
+			FRDGBufferRef HistogramBuffer = GraphBuilder.CreateBuffer(
+				FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), 16),
+				*FString::Printf(TEXT("Gaussian.RadixHist.S%d.C%d"), Binding.SceneId, Binding.ChunkIndex));
+			FRDGBufferRef ScatterBaseBuffer = GraphBuilder.CreateBuffer(
+				FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), 16),
+				*FString::Printf(TEXT("Gaussian.RadixBase.S%d.C%d"), Binding.SceneId, Binding.ChunkIndex));
+
+			FRDGBufferRef InputKeys = SortKeysA;
+			FRDGBufferRef OutputKeys = SortKeysB;
+
+			for (uint32 Digit = 0; Digit < 8u; ++Digit)
+			{
+				const uint32 DigitShift = Digit * 4u;
+				AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(HistogramBuffer), 0u);
+
+				{
+					FGaussianRadixCountCS::FParameters* CountParams = GraphBuilder.AllocParameters<FGaussianRadixCountCS::FParameters>();
+					CountParams->ElementCount = ElementCount;
+					CountParams->DigitShift = DigitShift;
+					CountParams->SortKeys = GraphBuilder.CreateSRV(InputKeys);
+					CountParams->RWHistogram = GraphBuilder.CreateUAV(HistogramBuffer);
+					const uint32 NumGroups = FMath::DivideAndRoundUp(ElementCount, GaussianThreadGroupSize);
+					FComputeShaderUtils::AddPass(
+						GraphBuilder,
+						RDG_EVENT_NAME("GaussianSimVerse::RadixCount d%u", Digit),
+						ERDGPassFlags::Compute,
+						RadixCountShader,
+						CountParams,
+						FIntVector(NumGroups, 1, 1));
+				}
+
+				{
+					FGaussianRadixPrefixSumCS::FParameters* PrefixParams = GraphBuilder.AllocParameters<FGaussianRadixPrefixSumCS::FParameters>();
+					PrefixParams->Histogram = GraphBuilder.CreateSRV(HistogramBuffer);
+					PrefixParams->RWScatterBase = GraphBuilder.CreateUAV(ScatterBaseBuffer);
+					FComputeShaderUtils::AddPass(
+						GraphBuilder,
+						RDG_EVENT_NAME("GaussianSimVerse::RadixPrefix d%u", Digit),
+						ERDGPassFlags::Compute,
+						RadixPrefixShader,
+						PrefixParams,
+						FIntVector(1, 1, 1));
+				}
+
+				{
+					FGaussianRadixScatterCS::FParameters* ScatterParams = GraphBuilder.AllocParameters<FGaussianRadixScatterCS::FParameters>();
+					ScatterParams->ElementCount = ElementCount;
+					ScatterParams->DigitShift = DigitShift;
+					ScatterParams->SortKeysIn = GraphBuilder.CreateSRV(InputKeys);
+					ScatterParams->RWScatterBase = GraphBuilder.CreateUAV(ScatterBaseBuffer);
+					ScatterParams->RWSortKeysOut = GraphBuilder.CreateUAV(OutputKeys);
+					const uint32 NumGroups = FMath::DivideAndRoundUp(ElementCount, GaussianThreadGroupSize);
+					FComputeShaderUtils::AddPass(
+						GraphBuilder,
+						RDG_EVENT_NAME("GaussianSimVerse::RadixScatter d%u", Digit),
+						ERDGPassFlags::Compute,
+						RadixScatterShader,
+						ScatterParams,
+						FIntVector(NumGroups, 1, 1));
+				}
+
+				Swap(InputKeys, OutputKeys);
 			}
+
+			// After even number of swaps, result is in SortKeysA.
+			SortedKeysBuffer = SortKeysA;
+		}
+		else
+		{
+			const uint32 PaddedCount = KeyBufferCount;
+			for (uint32 K = 2; K <= PaddedCount; K <<= 1)
+			{
+				for (uint32 J = K >> 1; J > 0; J >>= 1)
+				{
+					FGaussianBitonicSortCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FGaussianBitonicSortCS::FParameters>();
+					PassParameters->K = K;
+					PassParameters->J = J;
+					PassParameters->PaddedCount = PaddedCount;
+					PassParameters->RWSortKeys = SortKeysAUAV;
+
+					const uint32 NumGroups = FMath::DivideAndRoundUp(PaddedCount, GaussianThreadGroupSize);
+					FComputeShaderUtils::AddPass(
+						GraphBuilder,
+						RDG_EVENT_NAME("GaussianSimVerse::BitonicSort K%u J%u", K, J),
+						ERDGPassFlags::Compute,
+						BitonicShader,
+						PassParameters,
+						FIntVector(NumGroups, 1, 1));
+				}
+			}
+			SortedKeysBuffer = SortKeysA;
 		}
 
 		FRDGBufferUAVRef SortedIndicesUAV = GraphBuilder.CreateUAV(SortedIndicesBuffer);
 		{
 			FGaussianSortExtractCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FGaussianSortExtractCS::FParameters>();
 			PassParameters->MaxVisibleCount = MaxVisibleCount;
-			PassParameters->SortKeys = GraphBuilder.CreateSRV(SortKeysBuffer);
+			PassParameters->SortKeys = GraphBuilder.CreateSRV(SortedKeysBuffer);
 			PassParameters->VisibleCountBuffer = CullResult.VisibleCountSRV;
 			PassParameters->RWSortedIndices = SortedIndicesUAV;
 
-			const uint32 NumGroups = FMath::DivideAndRoundUp(PaddedCount, GaussianThreadGroupSize);
+			const uint32 NumGroups = FMath::DivideAndRoundUp(ElementCount, GaussianThreadGroupSize);
 			FComputeShaderUtils::AddPass(
 				GraphBuilder,
-				RDG_EVENT_NAME("GaussianSimVerse::SortExtract S%u C%u", Binding.SceneId, Binding.ChunkIndex),
+				RDG_EVENT_NAME("GaussianSimVerse::SortExtract S%u C%u (%s)", Binding.SceneId, Binding.ChunkIndex, bUseRadix ? TEXT("radix") : TEXT("bitonic")),
 				ERDGPassFlags::Compute,
 				ExtractShader,
 				PassParameters,
@@ -518,6 +613,9 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 	bool bAdaptiveUseTilePath = true;
 	if (TileRasterMode == 2 && bTileShadersValid && bHaveAdaptiveSceneMetrics)
 	{
+		const uint32 AdaptiveSplatCount = TransientResources.CullResults.Num() > 0
+			? TransientResources.CullResults[0].MaxVisibleCount
+			: 0u;
 		bAdaptiveUseTilePath = GaussianSimVerse::RenderSettings::ShouldUseTileRasterPath(
 			TileRasterMode,
 			bTileShadersValid,
@@ -525,7 +623,8 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 			static_cast<int32>(MaxSplatsPerTile),
 			AdaptiveViewDistance,
 			AdaptiveSceneBoundsRadius,
-			bAdaptiveLastTilePath);
+			bAdaptiveLastTilePath,
+			AdaptiveSplatCount);
 	}
 
 	for (int32 CullIndex = 0; CullIndex < TransientResources.CullResults.Num(); ++CullIndex)
@@ -595,7 +694,17 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 		bool bUseTilePath = false;
 		if (TileRasterMode == 2)
 		{
-			bUseTilePath = bAdaptiveUseTilePath;
+			bool bAdaptiveState = bAdaptiveUseTilePath;
+			bUseTilePath = GaussianSimVerse::RenderSettings::ShouldUseTileRasterPath(
+				TileRasterMode,
+				bTileShadersValid,
+				EstimatedSplatsPerTile,
+				static_cast<int32>(MaxSplatsPerTile),
+				ViewDistanceToScene,
+				SceneBoundsRadius,
+				bAdaptiveState,
+				SortedCount);
+			bAdaptiveLastTilePath = bAdaptiveState;
 		}
 		else
 		{
@@ -607,8 +716,25 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 				static_cast<int32>(MaxSplatsPerTile),
 				ViewDistanceToScene,
 				SceneBoundsRadius,
-				bUnusedAdaptiveState);
+				bUnusedAdaptiveState,
+				SortedCount);
 		}
+
+		// Hard guard: never run global per-splat raster on million-scale clouds (GPU TDR).
+		const uint32 MaxSafeGlobal = GaussianSimVerse::RenderSettings::GetMaxSafeGlobalRasterSplats();
+		if (!bUseTilePath && SortedCount > MaxSafeGlobal && bTileShadersValid)
+		{
+			bUseTilePath = true;
+			static bool bLoggedForceTileOnce = false;
+			if (!bLoggedForceTileOnce)
+			{
+				bLoggedForceTileOnce = true;
+				UE_LOG(LogGaussianSimVerse, Warning,
+					TEXT("GaussianSimVerse: forcing tile raster for %u splats (global path TDRs above %u). Raise r.GaussianSimVerse.MaxSortElements only if you also raise sort capacity."),
+					SortedCount, MaxSafeGlobal);
+			}
+		}
+
 		if (!bUseTilePath && !RasterShader.IsValid() && bTileShadersValid)
 		{
 			bUseTilePath = true;

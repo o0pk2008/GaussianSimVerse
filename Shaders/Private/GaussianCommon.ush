@@ -13,12 +13,13 @@
 #endif
 
 #ifndef GAUSSIAN_TILE_BIN_PADDING_PIXELS
-#define GAUSSIAN_TILE_BIN_PADDING_PIXELS 2.0
+/** Keep padding small so large PLYs do not over-subscribe neighboring tiles (block artifacts). */
+#define GAUSSIAN_TILE_BIN_PADDING_PIXELS 1.0
 #endif
 
 #ifndef GAUSSIAN_TILE_HOME_BIN_MAX_EXTENT
-/** Splats smaller than this are binned to their center tile only (reduces far-field overflow). */
-#define GAUSSIAN_TILE_HOME_BIN_MAX_EXTENT 8.0
+/** Splats smaller than this use home-tile (+/-1 row) binning only — fewer tile overflows on dense PLY. */
+#define GAUSSIAN_TILE_HOME_BIN_MAX_EXTENT 32.0
 #endif
 
 /** Expand screen-space bounds used for tile binning to avoid seams at tile boundaries. */
@@ -64,11 +65,30 @@ void AddSplatToTileList(
 		return;
 	}
 
+	// Prefer nearer entries. SortedIndex is the global depth rank when radix/bitonic sort ran
+	// (lower = nearer). Preferring lower SortedIndex on overflow reduces PLY block flicker vs
+	// pure InterlockedAdd races. First Capacity arrivals still take unique slots.
 	uint LocalSlot;
 	InterlockedAdd(RWTileFillCounters[TileId], 1u, LocalSlot);
 	if (LocalSlot < TileCapacity)
 	{
 		RWTileSplats[TileStart + LocalSlot] = uint2(SortKey, SortedIndex);
+		return;
+	}
+
+	const uint ProbeBase = (SortedIndex * 747796405u) ^ (SortKey * 2891336453u);
+	const uint ProbeStride = max(1u, TileCapacity / 8u);
+	[unroll]
+	for (uint Probe = 0u; Probe < 8u; ++Probe)
+	{
+		const uint Victim = (ProbeBase + Probe * ProbeStride) % TileCapacity;
+		const uint Flat = TileStart + Victim;
+		const uint2 Old = RWTileSplats[Flat];
+		// Nearer depth rank wins; SortKey breaks remaining ties.
+		if (SortedIndex < Old.y || (SortedIndex == Old.y && SortKey < Old.x))
+		{
+			RWTileSplats[Flat] = uint2(SortKey, SortedIndex);
+		}
 	}
 }
 
@@ -240,6 +260,15 @@ float3 UeToPlyDirection(float3 UeDir)
 	return normalize(float3(-UeDir.x, -UeDir.z, -UeDir.y));
 }
 
+/** Map 3DGS/SuperSplat LDR colors into UE scene-linear for post-process tonemapping. */
+float3 PrepareGaussianColorForScene(float3 Color)
+{
+	Color = saturate(Color);
+	// SuperSplat presents display-referred colors on an sRGB surface. SceneColor is linear
+	// and goes through UE's tonemapper — without sRGB->linear, results look washed-out/pale.
+	return pow(Color, 2.2);
+}
+
 float3 EvaluateGaussianShRadiance(
 	StructuredBuffer<float> GaussianShCoeffs,
 	uint GaussianIndex,
@@ -252,7 +281,7 @@ float3 EvaluateGaussianShRadiance(
 	const uint Degree = min(RenderShDegree, ImportedShDegree);
 	if (bHasShCoefficients == 0u || Degree == 0u)
 	{
-		return FallbackLinearRgb;
+		return PrepareGaussianColorForScene(FallbackLinearRgb);
 	}
 
 	WorldViewDir = UeToPlyDirection(WorldViewDir);
@@ -318,7 +347,7 @@ float3 EvaluateGaussianShRadiance(
 		}
 	}
 
-	return max(rgb, 0.0);
+	return PrepareGaussianColorForScene(rgb);
 }
 
 float3 ComputeGaussianWorldViewDir(

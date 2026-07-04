@@ -22,6 +22,9 @@ IMPLEMENT_GAUSSIAN_CS(FGaussianCullCS, "/Plugin/GaussianSimVerse/Private/CullCS.
 IMPLEMENT_GAUSSIAN_CS(FGaussianSortKeysCS, "/Plugin/GaussianSimVerse/Private/SortKeysCS.usf")
 IMPLEMENT_GAUSSIAN_CS(FGaussianBitonicSortCS, "/Plugin/GaussianSimVerse/Private/BitonicSortCS.usf")
 IMPLEMENT_GAUSSIAN_CS(FGaussianSortExtractCS, "/Plugin/GaussianSimVerse/Private/SortExtractCS.usf")
+IMPLEMENT_GAUSSIAN_CS(FGaussianRadixCountCS, "/Plugin/GaussianSimVerse/Private/RadixCountCS.usf")
+IMPLEMENT_GAUSSIAN_CS(FGaussianRadixPrefixSumCS, "/Plugin/GaussianSimVerse/Private/RadixPrefixSumCS.usf")
+IMPLEMENT_GAUSSIAN_CS(FGaussianRadixScatterCS, "/Plugin/GaussianSimVerse/Private/RadixScatterCS.usf")
 IMPLEMENT_GAUSSIAN_CS(FGaussianRasterCS, "/Plugin/GaussianSimVerse/Private/RasterCS.usf")
 IMPLEMENT_GAUSSIAN_CS(FGaussianResolveCS, "/Plugin/GaussianSimVerse/Private/ResolveCS.usf")
 

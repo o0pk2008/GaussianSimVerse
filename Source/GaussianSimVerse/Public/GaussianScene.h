@@ -33,7 +33,7 @@ public:
 	bool bEnableRendering = true;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Gaussian|Rendering")
-	float SplatScale = 1.5f;
+	float SplatScale = 1.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Gaussian|Rendering")
 	float AlphaCullThreshold = 0.007843137f;

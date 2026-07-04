@@ -18,6 +18,7 @@ namespace GaussianSimVerse::RenderSettings
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<float> CVarSplatScale;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarMaxRasterRadius;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarMaxSortElements;
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarSortMethod;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarMaxScenesPerView;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarMaxRasterSplats;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarDebugRender;
@@ -47,6 +48,12 @@ namespace GaussianSimVerse::RenderSettings
 	FORCEINLINE bool IsSortEnabled()
 	{
 		return CVarEnableSort.GetValueOnAnyThread() != 0;
+	}
+
+	/** 0 = bitonic, 1 = radix (default). */
+	FORCEINLINE int32 GetSortMethod()
+	{
+		return FMath::Clamp(CVarSortMethod.GetValueOnAnyThread(), 0, 1);
 	}
 
 	FORCEINLINE bool IsRasterEnabled()
@@ -98,6 +105,16 @@ namespace GaussianSimVerse::RenderSettings
 		return FMath::Clamp(CVarMaxSplatsPerTile.GetValueOnAnyThread(), 16, ShaderMaxSplatsPerTile);
 	}
 
+	/**
+	 * Global per-splat raster loops over each splat's screen footprint (up to MaxRasterRadius^2
+	 * pixels) with RMW UAV blends. Million-scale PLYs TDR the GPU — keep this independent of
+	 * MaxSortElements (sort can be large; global pixel loops cannot).
+	 */
+	FORCEINLINE uint32 GetMaxSafeGlobalRasterSplats()
+	{
+		return 262144u;
+	}
+
 	/** Adaptive mode with hysteresis: tile close/medium, global only when clearly far (splats tiny). */
 	FORCEINLINE bool ShouldUseTileRasterPath(
 		int32 RasterMode,
@@ -106,7 +123,8 @@ namespace GaussianSimVerse::RenderSettings
 		int32 MaxSplatsPerTile,
 		float ViewDistanceToScene,
 		float SceneBoundsRadius,
-		bool& bInOutLastUsedTilePath)
+		bool& bInOutLastUsedTilePath,
+		uint32 TotalSplatCount = 0)
 	{
 		if (!bTileShadersValid)
 		{
@@ -114,28 +132,42 @@ namespace GaussianSimVerse::RenderSettings
 		}
 		if (RasterMode == 0)
 		{
+			// Explicit global request — caller must still guard huge clouds.
 			return false;
 		}
+
+		const uint32 MaxSafeGlobal = GetMaxSafeGlobalRasterSplats();
+		const bool bGlobalSafe = TotalSplatCount == 0 || TotalSplatCount <= MaxSafeGlobal;
+
 		const float SafeRadius = FMath::Max(SceneBoundsRadius, 1.0f);
 		const float DistanceToRadius = ViewDistanceToScene / SafeRadius;
 		const float FarViewRatio = FMath::Max(2.0f, CVarAdaptiveFarViewRatio.GetValueOnAnyThread());
+
+		const uint32 TileDenseThreshold = static_cast<uint32>(FMath::Max(16, (MaxSplatsPerTile * 3) / 4));
+		// Dense tiles overflow → 16px block seams. Prefer global only when the cloud is small
+		// enough that per-splat screen loops will not TDR the device.
+		if (bGlobalSafe && EstimatedSplatsPerTile > TileDenseThreshold)
+		{
+			return false;
+		}
 
 		if (RasterMode == 1)
 		{
 			// Tile-first mode still falls back to global when clearly far; otherwise all splats
 			// cluster into a few tiles and overflow the per-tile cap (empty bbox at distance).
-			if (DistanceToRadius > FarViewRatio)
-			{
-				return false;
-			}
-			if (EstimatedSplatsPerTile > static_cast<uint32>(FMath::Max(16, (MaxSplatsPerTile * 3) / 4)))
+			if (bGlobalSafe && DistanceToRadius > FarViewRatio)
 			{
 				return false;
 			}
 			return true;
 		}
 
-		(void)MaxSplatsPerTile;
+		if (!bGlobalSafe)
+		{
+			// Large PLYs must stay on the tile path (global raster TDRs).
+			bInOutLastUsedTilePath = true;
+			return true;
+		}
 
 		const float Hysteresis = FMath::Max(0.0f, CVarAdaptiveFarViewHysteresis.GetValueOnAnyThread());
 

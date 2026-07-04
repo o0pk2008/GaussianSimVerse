@@ -103,6 +103,57 @@ public:
 	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
 };
 
+/** 4-bit digit histogram for GPU radix sort (3DGS.cpp / VkRadixSort style). */
+class GAUSSIANSIMVERSE_API FGaussianRadixCountCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FGaussianRadixCountCS);
+	SHADER_USE_PARAMETER_STRUCT(FGaussianRadixCountCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER(uint32, ElementCount)
+		SHADER_PARAMETER(uint32, DigitShift)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint2>, SortKeys)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, RWHistogram)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
+};
+
+class GAUSSIANSIMVERSE_API FGaussianRadixPrefixSumCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FGaussianRadixPrefixSumCS);
+	SHADER_USE_PARAMETER_STRUCT(FGaussianRadixPrefixSumCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, Histogram)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, RWScatterBase)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
+};
+
+class GAUSSIANSIMVERSE_API FGaussianRadixScatterCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FGaussianRadixScatterCS);
+	SHADER_USE_PARAMETER_STRUCT(FGaussianRadixScatterCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER(uint32, ElementCount)
+		SHADER_PARAMETER(uint32, DigitShift)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint2>, SortKeysIn)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, RWScatterBase)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint2>, RWSortKeysOut)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
+};
+
 class GAUSSIANSIMVERSE_API FGaussianBinSplatsCountCS : public FGlobalShader
 {
 public:

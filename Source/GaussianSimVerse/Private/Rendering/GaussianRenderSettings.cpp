@@ -68,8 +68,9 @@ namespace GaussianSimVerse::RenderSettings
 
 	TAutoConsoleVariable<float> CVarSplatScale(
 		TEXT("r.GaussianSimVerse.SplatScale"),
-		1.5f,
-		TEXT("Screen-space scale factor for Gaussian splat footprints."),
+		1.0f,
+		TEXT("Screen-space scale factor for Gaussian splat footprints (1.0 matches SuperSplat).\n")
+		TEXT("Values >1 inflate footprints and wash out color via over-blending."),
 		ECVF_RenderThreadSafe | ECVF_Scalability);
 
 	TAutoConsoleVariable<int32> CVarMaxRasterRadius(
@@ -80,10 +81,17 @@ namespace GaussianSimVerse::RenderSettings
 
 	TAutoConsoleVariable<int32> CVarMaxSortElements(
 		TEXT("r.GaussianSimVerse.MaxSortElements"),
-		262144,
-		TEXT("Maximum Gaussians per chunk for GPU bitonic sort (padded to power of two).\n")
-		TEXT("Chunks larger than this skip sorting and rasterize all splats unsorted\n")
-		TEXT("(avoids partial Morton-order fragments on large SuperSplat PLYs)."),
+		8388608,
+		TEXT("Maximum Gaussians per chunk for GPU depth sort.\n")
+		TEXT("Default 8M covers large SuperSplat PLYs. Chunks larger than this skip sorting."),
+		ECVF_RenderThreadSafe | ECVF_Scalability);
+
+	TAutoConsoleVariable<int32> CVarSortMethod(
+		TEXT("r.GaussianSimVerse.SortMethod"),
+		1,
+		TEXT("GPU depth-sort algorithm (inspired by 3DGS.cpp / VkRadixSort):\n")
+		TEXT("0: Bitonic (power-of-two pad; many passes; fine for small clouds)\n")
+		TEXT("1: Radix 4-bit (default; O(n) passes; scales to millions)"),
 		ECVF_RenderThreadSafe | ECVF_Scalability);
 
 	TAutoConsoleVariable<int32> CVarMaxScenesPerView(
@@ -118,9 +126,10 @@ namespace GaussianSimVerse::RenderSettings
 		TEXT("r.GaussianSimVerse.UseTileRaster"),
 		2,
 		TEXT("Rasterization strategy:\n")
-		TEXT("0: Always global per-splat raster (no tile seams; slow when close)\n")
-		TEXT("1: Tile raster + TileSort + multi-batch blend (global fallback when far)\n")
-		TEXT("2: Adaptive — tile when close/medium, global when far (default)"),
+		TEXT("0: Always global per-splat raster (no tile seams; TDRs on million-scale PLYs)\n")
+		TEXT("1: Tile raster + TileSort + multi-batch blend (global fallback when far/dense)\n")
+		TEXT("2: Adaptive — tile when close/medium; global when far/dense and cloud is small\n")
+		TEXT("   enough to be safe (default). Clouds larger than MaxSortElements always use tile."),
 		ECVF_RenderThreadSafe | ECVF_Scalability);
 
 	TAutoConsoleVariable<float> CVarAdaptiveFarViewRatio(
@@ -141,10 +150,10 @@ namespace GaussianSimVerse::RenderSettings
 
 	TAutoConsoleVariable<int32> CVarMaxSplatsPerTile(
 		TEXT("r.GaussianSimVerse.MaxSplatsPerTile"),
-		8192,
+		16384,
 		TEXT("Maximum splats stored per 16x16 tile (tile raster).\n")
 		TEXT("TileSort + multi-batch TileBlend process the full list up to this cap.\n")
-		TEXT("Values above the cap are clamped. Lower values cause 16px tile dropout (blocks).\n")
+		TEXT("Lower values cause 16px tile dropout (blocks) on dense PLYs.\n")
 		TEXT("Valid range: 16..16384"),
 		ECVF_RenderThreadSafe | ECVF_Scalability);
 
