@@ -2,6 +2,7 @@
 // Stable-ish scatter for one 4-bit radix digit (atomic offsets per bin).
 
 #include "/Engine/Public/Platform.ush"
+#include "/Plugin/GaussianSimVerse/Private/GaussianCommon.ush"
 
 StructuredBuffer<uint2> SortKeysIn;
 RWStructuredBuffer<uint> RWScatterBase;
@@ -20,7 +21,7 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 	}
 
 	const uint2 Item = SortKeysIn[Index];
-	const uint Digit = (Item.x >> DigitShift) & 0xFu;
+	const uint Digit = GetGaussianSortDigit(Item, DigitShift);
 	uint Dest = 0u;
 	InterlockedAdd(RWScatterBase[Digit], 1u, Dest);
 	RWSortKeysOut[Dest] = Item;

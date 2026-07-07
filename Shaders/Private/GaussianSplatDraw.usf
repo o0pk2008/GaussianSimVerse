@@ -1,0 +1,174 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+// Instanced screen-space splat quads (SuperSplat-style graphics raster).
+
+#include "/Engine/Public/Platform.ush"
+#include "/Plugin/GaussianSimVerse/Private/GaussianCommon.ush"
+
+float4x4 LocalToWorldMatrix;
+float3 PreViewTranslation;
+float4x4 TranslatedViewMatrix;
+float4x4 TranslatedWorldToClip;
+float4 ViewportRect;
+float4 ViewRect;
+uint BatchStart;
+uint BatchCount;
+uint SortedCount;
+uint GaussianCount;
+float SplatScale;
+float GaussianAlphaCutoff;
+float GaussianAlphaCullThreshold;
+float GaussianCutoffK;
+float GaussianCovarianceDilation;
+float GaussianMinSigmaPixels;
+uint MaxRasterRadius;
+uint bDebugOverlay;
+uint RenderShDegree;
+uint ImportedShDegree;
+uint bHasShCoefficients;
+float3 CameraWorldPosition;
+
+StructuredBuffer<uint> SortedIndices;
+StructuredBuffer<uint> VisibleCountBuffer;
+StructuredBuffer<float4> GaussianSplatsVec4;
+StructuredBuffer<float> GaussianShCoeffs;
+
+struct FGaussianSplatVSToPS
+{
+	float4 Position : SV_POSITION;
+	nointerpolation float2 ScreenCenter : TEXCOORD0;
+	nointerpolation float3 InvConic : TEXCOORD1;
+	nointerpolation float EffectiveOpacity : TEXCOORD2;
+	nointerpolation float3 Color : TEXCOORD3;
+};
+
+float2 ScreenPixelToClip(float2 ScreenPixel)
+{
+	const float2 ViewSize = max(ViewRect.zw, float2(1.0, 1.0));
+	const float2 Ndc = float2(
+		(ScreenPixel.x / ViewSize.x) * 2.0 - 1.0,
+		1.0 - (ScreenPixel.y / ViewSize.y) * 2.0);
+	return Ndc;
+}
+
+void MainVS(
+	uint VertexId : SV_VertexID,
+	uint InstanceId : SV_InstanceID,
+	out FGaussianSplatVSToPS Output)
+{
+	static const uint CornerIndices[6] = { 0u, 1u, 2u, 0u, 2u, 3u };
+	static const float2 CornerSigns[4] =
+	{
+		float2(-1.0, -1.0),
+		float2(-1.0,  1.0),
+		float2( 1.0,  1.0),
+		float2( 1.0, -1.0)
+	};
+
+	Output.Position = float4(2.0, 2.0, 0.0, 1.0);
+	Output.ScreenCenter = 0.0;
+	Output.InvConic = 0.0;
+	Output.EffectiveOpacity = 0.0;
+	Output.Color = 0.0;
+
+	const uint SortedIndex = BatchStart + InstanceId;
+	const uint VisibleCount = min(SortedCount, VisibleCountBuffer[0]);
+	if (InstanceId >= BatchCount || SortedIndex >= VisibleCount)
+	{
+		return;
+	}
+
+	const uint GaussianIndex = SortedIndices[SortedIndex];
+	if (GaussianIndex >= GaussianCount)
+	{
+		return;
+	}
+
+	const FGaussianSplatGPU Splat = LoadGaussianSplat(GaussianSplatsVec4, GaussianIndex);
+	if (Splat.Opacity < GaussianAlphaCullThreshold)
+	{
+		return;
+	}
+
+	float2 ScreenCenter;
+	float3 InvConic;
+	float2 Extent;
+	float3 ViewPosition;
+	float EffectiveOpacity;
+	if (!ProjectSplatEllipse(
+		Splat,
+		LocalToWorldMatrix,
+		PreViewTranslation,
+		TranslatedViewMatrix,
+		TranslatedWorldToClip,
+		ViewportRect,
+		ViewRect,
+		SplatScale,
+		GaussianCutoffK,
+		GaussianCovarianceDilation,
+		GaussianMinSigmaPixels,
+		MaxRasterRadius,
+		ScreenCenter,
+		InvConic,
+		Extent,
+		ViewPosition,
+		EffectiveOpacity))
+	{
+		return;
+	}
+
+	if (bDebugOverlay != 0u)
+	{
+		Extent = 8.0.xx;
+	}
+
+	const float2 Corner = CornerSigns[CornerIndices[VertexId]];
+	const float2 ScreenPos = ScreenCenter + Corner * Extent;
+	const float2 ClipXY = ScreenPixelToClip(ScreenPos);
+
+	Output.Position = float4(ClipXY, 0.0, 1.0);
+	Output.ScreenCenter = ScreenCenter;
+	Output.InvConic = InvConic;
+	Output.EffectiveOpacity = EffectiveOpacity;
+
+	if (bDebugOverlay != 0u)
+	{
+		Output.Color = float3(1.0, 0.1, 0.8);
+		return;
+	}
+
+	const float3 WorldViewDir = ComputeGaussianWorldViewDir(
+		Splat.Position,
+		LocalToWorldMatrix,
+		CameraWorldPosition);
+	Output.Color = EvaluateGaussianShRadiance(
+		GaussianShCoeffs,
+		GaussianIndex,
+		RenderShDegree,
+		ImportedShDegree,
+		bHasShCoefficients,
+		WorldViewDir,
+		Splat.Color.rgb);
+}
+
+float4 MainPS(FGaussianSplatVSToPS Input) : SV_Target0
+{
+	if (bDebugOverlay != 0u)
+	{
+		return float4(Input.Color, 1.0);
+	}
+
+	const float2 PixelCenter = Input.Position.xy;
+	const float Alpha = EvaluateSplatAlphaEllipse(
+		PixelCenter,
+		Input.ScreenCenter,
+		Input.InvConic,
+		Input.EffectiveOpacity,
+		GaussianCutoffK,
+		bDebugOverlay);
+	if (Alpha < GaussianAlphaCutoff)
+	{
+		discard;
+	}
+
+	return float4(Input.Color * Alpha, Alpha);
+}

@@ -25,7 +25,7 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 	uint2 KeyB = RWSortKeys[PartnerIndex];
 
 	const bool bAscending = ((Index & K) == 0);
-	const bool bShouldSwap = bAscending ? (KeyA.x > KeyB.x) : (KeyA.x < KeyB.x);
+	const bool bShouldSwap = bAscending ? GaussianSortKeyGreater(KeyA, KeyB) : GaussianSortKeyLess(KeyA, KeyB);
 	if (bShouldSwap)
 	{
 		RWSortKeys[Index] = KeyB;

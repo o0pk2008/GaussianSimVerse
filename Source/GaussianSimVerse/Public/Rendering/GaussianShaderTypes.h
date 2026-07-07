@@ -306,6 +306,64 @@ public:
 	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
 };
 
+/** Shared uniforms for instanced splat quad draw (VS + PS). */
+BEGIN_SHADER_PARAMETER_STRUCT(FGaussianSplatDrawSharedParameters, )
+	SHADER_PARAMETER(FMatrix44f, LocalToWorldMatrix)
+	SHADER_PARAMETER(FVector3f, PreViewTranslation)
+	SHADER_PARAMETER(FMatrix44f, TranslatedViewMatrix)
+	SHADER_PARAMETER(FMatrix44f, TranslatedWorldToClip)
+	SHADER_PARAMETER(FVector4f, ViewportRect)
+	SHADER_PARAMETER(FVector4f, ViewRect)
+	SHADER_PARAMETER(uint32, BatchStart)
+	SHADER_PARAMETER(uint32, BatchCount)
+	SHADER_PARAMETER(uint32, SortedCount)
+	SHADER_PARAMETER(uint32, GaussianCount)
+	SHADER_PARAMETER(float, SplatScale)
+	SHADER_PARAMETER(float, GaussianAlphaCutoff)
+	SHADER_PARAMETER(float, GaussianAlphaCullThreshold)
+	SHADER_PARAMETER(float, GaussianCutoffK)
+	SHADER_PARAMETER(float, GaussianCovarianceDilation)
+	SHADER_PARAMETER(float, GaussianMinSigmaPixels)
+	SHADER_PARAMETER(uint32, MaxRasterRadius)
+	SHADER_PARAMETER(uint32, bDebugOverlay)
+	SHADER_PARAMETER(uint32, RenderShDegree)
+	SHADER_PARAMETER(uint32, ImportedShDegree)
+	SHADER_PARAMETER(uint32, bHasShCoefficients)
+	SHADER_PARAMETER(FVector3f, CameraWorldPosition)
+	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, SortedIndices)
+	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, VisibleCountBuffer)
+	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, GaussianSplatsVec4)
+	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, GaussianShCoeffs)
+END_SHADER_PARAMETER_STRUCT()
+
+/** Instanced screen-space splat quads — hardware raster (SuperSplat-style global draw). */
+class GAUSSIANSIMVERSE_API FGaussianSplatDrawVS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FGaussianSplatDrawVS);
+	SHADER_USE_PARAMETER_STRUCT(FGaussianSplatDrawVS, FGlobalShader);
+
+	using FParameters = FGaussianSplatDrawSharedParameters;
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
+};
+
+class GAUSSIANSIMVERSE_API FGaussianSplatDrawPS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FGaussianSplatDrawPS);
+	SHADER_USE_PARAMETER_STRUCT(FGaussianSplatDrawPS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_STRUCT_INCLUDE(FGaussianSplatDrawSharedParameters, Shared)
+		RENDER_TARGET_BINDING_SLOTS()
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
+};
+
 class GAUSSIANSIMVERSE_API FGaussianRasterCS : public FGlobalShader
 {
 public:

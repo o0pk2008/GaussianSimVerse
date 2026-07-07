@@ -28,6 +28,31 @@ IMPLEMENT_GAUSSIAN_CS(FGaussianRadixScatterCS, "/Plugin/GaussianSimVerse/Private
 IMPLEMENT_GAUSSIAN_CS(FGaussianRasterCS, "/Plugin/GaussianSimVerse/Private/RasterCS.usf")
 IMPLEMENT_GAUSSIAN_CS(FGaussianResolveCS, "/Plugin/GaussianSimVerse/Private/ResolveCS.usf")
 
+IMPLEMENT_GLOBAL_SHADER(FGaussianSplatDrawVS, "/Plugin/GaussianSimVerse/Private/GaussianSplatDraw.usf", "MainVS", SF_Vertex);
+IMPLEMENT_GLOBAL_SHADER(FGaussianSplatDrawPS, "/Plugin/GaussianSimVerse/Private/GaussianSplatDraw.usf", "MainPS", SF_Pixel);
+
+bool FGaussianSplatDrawVS::ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+{
+	return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+}
+
+void FGaussianSplatDrawVS::ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+{
+	FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+	OutEnvironment.CompilerFlags.Add(CFLAG_StandardOptimization);
+}
+
+bool FGaussianSplatDrawPS::ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+{
+	return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+}
+
+void FGaussianSplatDrawPS::ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+{
+	FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+	OutEnvironment.CompilerFlags.Add(CFLAG_StandardOptimization);
+}
+
 IMPLEMENT_GLOBAL_SHADER(FGaussianBinSplatsCountCS, "/Plugin/GaussianSimVerse/Private/BinSplatsCountCS.usf", "MainCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FGaussianBinSplatsFillCS, "/Plugin/GaussianSimVerse/Private/BinSplatsFillCS.usf", "MainCS", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FGaussianTilePrefixSumCS, "/Plugin/GaussianSimVerse/Private/TilePrefixSumCS.usf", "MainCS", SF_Compute);

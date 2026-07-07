@@ -115,7 +115,7 @@ namespace GaussianSimVerse::RenderSettings
 		return 262144u;
 	}
 
-	/** Adaptive mode with hysteresis: tile close/medium, global only when clearly far (splats tiny). */
+	/** Adaptive mode: instanced splat draw by default; tile only when forced (mode 1). */
 	FORCEINLINE bool ShouldUseTileRasterPath(
 		int32 RasterMode,
 		bool bTileShadersValid,
@@ -124,7 +124,8 @@ namespace GaussianSimVerse::RenderSettings
 		float ViewDistanceToScene,
 		float SceneBoundsRadius,
 		bool& bInOutLastUsedTilePath,
-		uint32 TotalSplatCount = 0)
+		uint32 TotalSplatCount = 0,
+		bool bDrawRasterAvailable = false)
 	{
 		if (!bTileShadersValid)
 		{
@@ -132,7 +133,17 @@ namespace GaussianSimVerse::RenderSettings
 		}
 		if (RasterMode == 0)
 		{
-			// Explicit global request — caller must still guard huge clouds.
+			return false;
+		}
+		if (RasterMode == 1)
+		{
+			return true;
+		}
+
+		// Adaptive (mode 2): prefer hardware splat draw — no per-tile cap, no compute TDR.
+		if (bDrawRasterAvailable)
+		{
+			bInOutLastUsedTilePath = false;
 			return false;
 		}
 
@@ -144,27 +155,13 @@ namespace GaussianSimVerse::RenderSettings
 		const float FarViewRatio = FMath::Max(2.0f, CVarAdaptiveFarViewRatio.GetValueOnAnyThread());
 
 		const uint32 TileDenseThreshold = static_cast<uint32>(FMath::Max(16, (MaxSplatsPerTile * 3) / 4));
-		// Dense tiles overflow → 16px block seams. Prefer global only when the cloud is small
-		// enough that per-splat screen loops will not TDR the device.
 		if (bGlobalSafe && EstimatedSplatsPerTile > TileDenseThreshold)
 		{
 			return false;
 		}
 
-		if (RasterMode == 1)
-		{
-			// Tile-first mode still falls back to global when clearly far; otherwise all splats
-			// cluster into a few tiles and overflow the per-tile cap (empty bbox at distance).
-			if (bGlobalSafe && DistanceToRadius > FarViewRatio)
-			{
-				return false;
-			}
-			return true;
-		}
-
 		if (!bGlobalSafe)
 		{
-			// Large PLYs must stay on the tile path (global raster TDRs).
 			bInOutLastUsedTilePath = true;
 			return true;
 		}

@@ -9,10 +9,121 @@
 #include "RenderGraphUtils.h"
 #include "ShaderParameterStruct.h"
 #include "GlobalShader.h"
+#include "PipelineStateCache.h"
+#include "RHIStaticStates.h"
+#include "CommonRenderResources.h"
 
 namespace GaussianRenderGraphPrivate
 {
 	static constexpr uint32 SplatsPerRasterBatch = 2048;
+	static constexpr uint32 SplatsPerDrawBatch = 65535;
+
+	static void FillGaussianSplatDrawParameters(
+		FGaussianSplatDrawSharedParameters& OutParameters,
+		const FMatrix44f& LocalToWorldMatrix,
+		const FVector3f& PreViewTranslation,
+		const FMatrix44f& TranslatedViewMatrix,
+		const FMatrix44f& TranslatedWorldToClip,
+		const FVector4f& ViewportRect,
+		const FVector4f& ViewRect,
+		uint32 BatchStart,
+		uint32 BatchCount,
+		uint32 SortedCount,
+		uint32 GaussianCount,
+		float SplatScale,
+		float GaussianAlphaCutoff,
+		float GaussianAlphaCullThreshold,
+		float GaussianCutoffK,
+		float GaussianCovarianceDilation,
+		float GaussianMinSigmaPixels,
+		uint32 MaxRasterRadius,
+		bool bDebugOverlay,
+		uint32 RenderShDegree,
+		uint32 ImportedShDegree,
+		uint32 bHasShCoefficients,
+		const FVector3f& CameraWorldPosition,
+		FRDGBufferSRVRef SortedIndicesSRV,
+		FRDGBufferSRVRef VisibleCountSRV,
+		FRDGBufferSRVRef GaussianSplatsSRV,
+		FRDGBufferSRVRef GaussianShCoeffsSRV)
+	{
+		OutParameters.LocalToWorldMatrix = LocalToWorldMatrix;
+		OutParameters.PreViewTranslation = PreViewTranslation;
+		OutParameters.TranslatedViewMatrix = TranslatedViewMatrix;
+		OutParameters.TranslatedWorldToClip = TranslatedWorldToClip;
+		OutParameters.ViewportRect = ViewportRect;
+		OutParameters.ViewRect = ViewRect;
+		OutParameters.BatchStart = BatchStart;
+		OutParameters.BatchCount = BatchCount;
+		OutParameters.SortedCount = SortedCount;
+		OutParameters.GaussianCount = GaussianCount;
+		OutParameters.SplatScale = SplatScale;
+		OutParameters.GaussianAlphaCutoff = GaussianAlphaCutoff;
+		OutParameters.GaussianAlphaCullThreshold = GaussianAlphaCullThreshold;
+		OutParameters.GaussianCutoffK = GaussianCutoffK;
+		OutParameters.GaussianCovarianceDilation = GaussianCovarianceDilation;
+		OutParameters.GaussianMinSigmaPixels = GaussianMinSigmaPixels;
+		OutParameters.MaxRasterRadius = MaxRasterRadius;
+		OutParameters.bDebugOverlay = bDebugOverlay ? 1u : 0u;
+		OutParameters.RenderShDegree = RenderShDegree;
+		OutParameters.ImportedShDegree = ImportedShDegree;
+		OutParameters.bHasShCoefficients = bHasShCoefficients;
+		OutParameters.CameraWorldPosition = CameraWorldPosition;
+		OutParameters.SortedIndices = SortedIndicesSRV;
+		OutParameters.VisibleCountBuffer = VisibleCountSRV;
+		OutParameters.GaussianSplatsVec4 = GaussianSplatsSRV;
+		OutParameters.GaussianShCoeffs = GaussianShCoeffsSRV;
+	}
+
+	static void AddGaussianSplatDrawPass(
+		FRDGBuilder& GraphBuilder,
+		FRDGEventName&& EventName,
+		const FGlobalShaderMap* GlobalShaderMap,
+		FGaussianSplatDrawPS::FParameters* PassParameters,
+		const FIntPoint& ViewportSize,
+		uint32 NumInstances)
+	{
+		if (NumInstances == 0)
+		{
+			return;
+		}
+
+		TShaderMapRef<FGaussianSplatDrawVS> VertexShader(GlobalShaderMap);
+		TShaderMapRef<FGaussianSplatDrawPS> PixelShader(GlobalShaderMap);
+		if (!VertexShader.IsValid() || !PixelShader.IsValid())
+		{
+			return;
+		}
+
+		GraphBuilder.AddPass(
+			Forward<FRDGEventName>(EventName),
+			PassParameters,
+			ERDGPassFlags::Raster,
+			[PassParameters, VertexShader, PixelShader, ViewportSize, NumInstances](FRHICommandList& RHICmdList)
+			{
+				FGraphicsPipelineStateInitializer GraphicsPSOInit;
+				RHICmdList.ApplyCachedRenderTargets(GraphicsPSOInit);
+				GraphicsPSOInit.PrimitiveType = PT_TriangleList;
+				GraphicsPSOInit.BlendState = TStaticBlendState<
+					CW_RGBA,
+					BO_Add, BF_One, BF_InverseSourceAlpha,
+					BO_Add, BF_One, BF_InverseSourceAlpha>::GetRHI();
+				GraphicsPSOInit.RasterizerState = TStaticRasterizerState<FM_Solid, CM_None>::GetRHI();
+				GraphicsPSOInit.DepthStencilState = TStaticDepthStencilState<false, CF_Always>::GetRHI();
+				GraphicsPSOInit.BoundShaderState.VertexDeclarationRHI = GEmptyVertexDeclaration.VertexDeclarationRHI;
+				GraphicsPSOInit.BoundShaderState.VertexShaderRHI = VertexShader.GetVertexShader();
+				GraphicsPSOInit.BoundShaderState.PixelShaderRHI = PixelShader.GetPixelShader();
+
+				SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, 0);
+				SetShaderParameters(RHICmdList, VertexShader, VertexShader.GetVertexShader(), PassParameters->Shared);
+				SetShaderParameters(RHICmdList, PixelShader, PixelShader.GetPixelShader(), *PassParameters);
+
+				RHICmdList.SetViewport(
+					0.0f, 0.0f, 0.0f,
+					static_cast<float>(ViewportSize.X), static_cast<float>(ViewportSize.Y), 1.0f);
+				RHICmdList.DrawPrimitive(0, 2, NumInstances);
+			});
+	}
 
 	static uint32 GetPaddedSortCount(uint32 VisibleCount)
 	{
@@ -351,7 +462,7 @@ void FGaussianRenderGraph::AddGPUDepthSortPasses(
 
 		if (bUseRadix)
 		{
-			// 8 passes x 4-bit digits over 32-bit depth keys (3DGS.cpp-style radix).
+			// 16 passes x 4-bit digits over 64-bit (depth, GaussianIndex) for stable far-to-near order.
 			FRDGBufferRef HistogramBuffer = GraphBuilder.CreateBuffer(
 				FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), 16),
 				*FString::Printf(TEXT("Gaussian.RadixHist.S%d.C%d"), Binding.SceneId, Binding.ChunkIndex));
@@ -362,7 +473,7 @@ void FGaussianRenderGraph::AddGPUDepthSortPasses(
 			FRDGBufferRef InputKeys = SortKeysA;
 			FRDGBufferRef OutputKeys = SortKeysB;
 
-			for (uint32 Digit = 0; Digit < 8u; ++Digit)
+			for (uint32 Digit = 0; Digit < 16u; ++Digit)
 			{
 				const uint32 DigitShift = Digit * 4u;
 				AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(HistogramBuffer), 0u);
@@ -485,11 +596,14 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 	const FGlobalShaderMap* GlobalShaderMap = GetGlobalShaderMap(GMaxRHIFeatureLevel);
 	const int32 TileRasterMode = GaussianSimVerse::RenderSettings::GetTileRasterMode();
 	const TShaderMapRef<FGaussianRasterCS> RasterShader(GlobalShaderMap);
+	const TShaderMapRef<FGaussianSplatDrawVS> SplatDrawVertexShader(GlobalShaderMap);
+	const TShaderMapRef<FGaussianSplatDrawPS> SplatDrawPixelShader(GlobalShaderMap);
 	const TShaderMapRef<FGaussianBinSplatsFillCS> BinFillShader(GlobalShaderMap);
 	const TShaderMapRef<FGaussianTileSortCS> TileSortShader(GlobalShaderMap);
 	const TShaderMapRef<FGaussianTileBlendCS> TileBlendShader(GlobalShaderMap);
+	const bool bDrawShadersValid = SplatDrawVertexShader.IsValid() && SplatDrawPixelShader.IsValid();
 	const bool bTileShadersValid = BinFillShader.IsValid() && TileSortShader.IsValid() && TileBlendShader.IsValid();
-	if (!bTileShadersValid && !RasterShader.IsValid())
+	if (!bTileShadersValid && !bDrawShadersValid && !RasterShader.IsValid())
 	{
 		UE_LOG(LogGaussianSimVerse, Warning, TEXT("GaussianSimVerse raster shaders are not compiled for this platform/feature level."));
 		return;
@@ -502,7 +616,7 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 
 	FRDGTextureDesc OverlayDesc = SceneColorTexture->Desc;
 	OverlayDesc.Extent = OverlayExtent;
-	OverlayDesc.Flags |= ETextureCreateFlags::ShaderResource | ETextureCreateFlags::UAV;
+	OverlayDesc.Flags |= ETextureCreateFlags::ShaderResource | ETextureCreateFlags::UAV | ETextureCreateFlags::RenderTargetable;
 	FRDGTextureRef OverlayTexture = GraphBuilder.CreateTexture(OverlayDesc, TEXT("Gaussian.SplatOverlay"));
 	FRDGTextureUAVRef OverlayUAV = GraphBuilder.CreateUAV(OverlayTexture);
 	AddClearUAVPass(GraphBuilder, OverlayUAV, FVector4f(0.0f, 0.0f, 0.0f, 0.0f));
@@ -624,7 +738,8 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 			AdaptiveViewDistance,
 			AdaptiveSceneBoundsRadius,
 			bAdaptiveLastTilePath,
-			AdaptiveSplatCount);
+			AdaptiveSplatCount,
+			bDrawShadersValid);
 	}
 
 	for (int32 CullIndex = 0; CullIndex < TransientResources.CullResults.Num(); ++CullIndex)
@@ -703,7 +818,8 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 				ViewDistanceToScene,
 				SceneBoundsRadius,
 				bAdaptiveState,
-				SortedCount);
+				SortedCount,
+				bDrawShadersValid);
 			bAdaptiveLastTilePath = bAdaptiveState;
 		}
 		else
@@ -717,12 +833,13 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 				ViewDistanceToScene,
 				SceneBoundsRadius,
 				bUnusedAdaptiveState,
-				SortedCount);
+				SortedCount,
+				bDrawShadersValid);
 		}
 
-		// Hard guard: never run global per-splat raster on million-scale clouds (GPU TDR).
+		// Legacy compute global raster TDRs on huge clouds — only force tile when draw shaders are unavailable.
 		const uint32 MaxSafeGlobal = GaussianSimVerse::RenderSettings::GetMaxSafeGlobalRasterSplats();
-		if (!bUseTilePath && SortedCount > MaxSafeGlobal && bTileShadersValid)
+		if (!bUseTilePath && !bDrawShadersValid && SortedCount > MaxSafeGlobal && bTileShadersValid)
 		{
 			bUseTilePath = true;
 			static bool bLoggedForceTileOnce = false;
@@ -735,20 +852,23 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 			}
 		}
 
-		if (!bUseTilePath && !RasterShader.IsValid() && bTileShadersValid)
+		if (!bUseTilePath && !bDrawShadersValid && !RasterShader.IsValid() && bTileShadersValid)
 		{
 			bUseTilePath = true;
 		}
 
-		if (TileRasterMode == 2 && bTileShadersValid && RasterShader.IsValid()
+		if (TileRasterMode == 2 && (bTileShadersValid || bDrawShadersValid)
 			&& GaussianSimVerse::RenderSettings::IsRenderDebugEnabled())
 		{
 			const float SafeRadius = FMath::Max(SceneBoundsRadius, 1.0f);
 			const float DistanceToRadius = ViewDistanceToScene / SafeRadius;
+			const TCHAR* RasterPathName = bUseTilePath
+				? TEXT("tile")
+				: (bDrawShadersValid ? TEXT("draw") : TEXT("compute"));
 			UE_LOG(LogGaussianSimVerse, Log,
 				TEXT("GaussianSimVerse raster S%u: %s (dist=%.0f radius=%.0f dist/radius=%.1f splats/tile~%u)"),
 				Binding.SceneId,
-				bUseTilePath ? TEXT("tile") : TEXT("global"),
+				RasterPathName,
 				ViewDistanceToScene,
 				SceneBoundsRadius,
 				DistanceToRadius,
@@ -862,6 +982,55 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 				TileBlendShader,
 				BlendParameters,
 				FIntVector(NumTilesX, NumTilesY, 1));
+		}
+		else if (bDrawShadersValid)
+		{
+			for (uint32 BatchStart = 0; BatchStart < SortedCount; BatchStart += GaussianRenderGraphPrivate::SplatsPerDrawBatch)
+			{
+				const uint32 BatchCount = FMath::Min(
+					GaussianRenderGraphPrivate::SplatsPerDrawBatch,
+					SortedCount - BatchStart);
+
+				FGaussianSplatDrawPS::FParameters* DrawParameters = GraphBuilder.AllocParameters<FGaussianSplatDrawPS::FParameters>();
+				GaussianRenderGraphPrivate::FillGaussianSplatDrawParameters(
+					DrawParameters->Shared,
+					FMatrix44f(Binding.LocalToWorld),
+					PreViewTranslation,
+					TranslatedViewMatrix,
+					TranslatedWorldToClip,
+					ViewportRect,
+					ViewRect,
+					BatchStart,
+					BatchCount,
+					SortedCount,
+					Binding.NumGaussians,
+					SplatScale,
+					GaussianAlphaCutoff,
+					GaussianAlphaCullThreshold,
+					GaussianCutoffK,
+					GaussianCovarianceDilation,
+					GaussianMinSigmaPixels,
+					MaxRasterRadius,
+					bDebugOverlay,
+					Binding.RenderShDegree,
+					Binding.ImportedShDegree,
+					Binding.bHasShCoefficients,
+					CameraWorldPosition,
+					SortedIndicesSRV,
+					CullResult.VisibleCountSRV,
+					Binding.SplatSRV,
+					Binding.ShCoefficientsSRV ? Binding.ShCoefficientsSRV : DummyShCoefficientsSRV);
+
+				DrawParameters->RenderTargets[0] = FRenderTargetBinding(OverlayTexture, ERenderTargetLoadAction::ELoad);
+
+				GaussianRenderGraphPrivate::AddGaussianSplatDrawPass(
+					GraphBuilder,
+					RDG_EVENT_NAME("GaussianSimVerse::SplatDraw S%u C%u (%u..%u)", Binding.SceneId, Binding.ChunkIndex, BatchStart, BatchStart + BatchCount),
+					GlobalShaderMap,
+					DrawParameters,
+					OverlayExtent,
+					BatchCount);
+			}
 		}
 		else
 		{

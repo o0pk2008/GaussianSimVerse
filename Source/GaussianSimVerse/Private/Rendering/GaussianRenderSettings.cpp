@@ -88,10 +88,10 @@ namespace GaussianSimVerse::RenderSettings
 
 	TAutoConsoleVariable<int32> CVarSortMethod(
 		TEXT("r.GaussianSimVerse.SortMethod"),
-		1,
-		TEXT("GPU depth-sort algorithm (inspired by 3DGS.cpp / VkRadixSort):\n")
-		TEXT("0: Bitonic (power-of-two pad; many passes; fine for small clouds)\n")
-		TEXT("1: Radix 4-bit (default; O(n) passes; scales to millions)"),
+		0,
+		TEXT("GPU depth-sort algorithm:\n")
+		TEXT("0: Bitonic + stable GaussianIndex tie-break (default; flicker-free transparency)\n")
+		TEXT("1: Radix 4-bit (faster on huge clouds; 64-bit stable key; may still flicker on ties)"),
 		ECVF_RenderThreadSafe | ECVF_Scalability);
 
 	TAutoConsoleVariable<int32> CVarMaxScenesPerView(
@@ -126,10 +126,10 @@ namespace GaussianSimVerse::RenderSettings
 		TEXT("r.GaussianSimVerse.UseTileRaster"),
 		2,
 		TEXT("Rasterization strategy:\n")
-		TEXT("0: Always global per-splat raster (no tile seams; TDRs on million-scale PLYs)\n")
-		TEXT("1: Tile raster + TileSort + multi-batch blend (global fallback when far/dense)\n")
-		TEXT("2: Adaptive — tile when close/medium; global when far/dense and cloud is small\n")
-		TEXT("   enough to be safe (default). Clouds larger than MaxSortElements always use tile."),
+		TEXT("0: Instanced splat draw (default global path; SuperSplat-style)\n")
+		TEXT("1: Tile compute raster (legacy; 16px blocks when tiles overflow)\n")
+		TEXT("2: Adaptive — instanced draw when shaders available (default)\n")
+		TEXT("   Falls back to tile/compute only if draw shaders fail to compile."),
 		ECVF_RenderThreadSafe | ECVF_Scalability);
 
 	TAutoConsoleVariable<float> CVarAdaptiveFarViewRatio(

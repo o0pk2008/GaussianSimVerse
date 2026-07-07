@@ -2,6 +2,7 @@
 // 4-bit digit histogram for GPU radix sort (inspired by 3DGS.cpp / VkRadixSort).
 
 #include "/Engine/Public/Platform.ush"
+#include "/Plugin/GaussianSimVerse/Private/GaussianCommon.ush"
 
 StructuredBuffer<uint2> SortKeys;
 RWStructuredBuffer<uint> RWHistogram;
@@ -18,6 +19,6 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 		return;
 	}
 
-	const uint Digit = (SortKeys[Index].x >> DigitShift) & 0xFu;
+	const uint Digit = GetGaussianSortDigit(SortKeys[Index], DigitShift);
 	InterlockedAdd(RWHistogram[Digit], 1u);
 }

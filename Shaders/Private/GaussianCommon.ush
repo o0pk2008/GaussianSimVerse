@@ -13,31 +13,14 @@
 #endif
 
 #ifndef GAUSSIAN_TILE_BIN_PADDING_PIXELS
-/** Keep padding small so large PLYs do not over-subscribe neighboring tiles (block artifacts). */
-#define GAUSSIAN_TILE_BIN_PADDING_PIXELS 1.0
-#endif
-
-#ifndef GAUSSIAN_TILE_HOME_BIN_MAX_EXTENT
-/** Splats smaller than this use home-tile (+/-1 row) binning only — fewer tile overflows on dense PLY. */
-#define GAUSSIAN_TILE_HOME_BIN_MAX_EXTENT 32.0
+/** Extra pixels beyond the projected AABB so Gaussian tails are not dropped at tile edges. */
+#define GAUSSIAN_TILE_BIN_PADDING_PIXELS 2.0
 #endif
 
 /** Expand screen-space bounds used for tile binning to avoid seams at tile boundaries. */
 float2 GetSplatTileBinningExtent(float2 Extent)
 {
 	return Extent + GAUSSIAN_TILE_BIN_PADDING_PIXELS;
-}
-
-int2 GetSplatHomeTileCoord(float2 ScreenCenter, float4 ViewRect, uint NumTilesX, uint NumTilesY)
-{
-	const int2 ViewMin = int2(ViewRect.xy);
-	const int2 CenterPixel = int2(floor(ScreenCenter));
-	int2 HomeTile = int2(
-		(CenterPixel.x - ViewMin.x) / int(GAUSSIAN_TILE_SIZE),
-		(CenterPixel.y - ViewMin.y) / int(GAUSSIAN_TILE_SIZE));
-	HomeTile.x = clamp(HomeTile.x, 0, (int)NumTilesX - 1);
-	HomeTile.y = clamp(HomeTile.y, 0, (int)NumTilesY - 1);
-	return HomeTile;
 }
 
 void AddSplatToTileList(
@@ -103,15 +86,23 @@ void GetSplatOverlappingTileRange(
 	out int2 TileMax)
 {
 	const int2 ViewMin = int2(ViewRect.xy);
-	const int2 MinPixel = int2(floor(ScreenCenter - BinExtent));
-	const int2 MaxPixel = int2(ceil(ScreenCenter + BinExtent));
+	const int2 ViewSize = int2(ViewRect.zw);
+	const int2 ViewMaxPixel = ViewMin + ViewSize - int2(1, 1);
+
+	// Clamp footprint to the visible viewport before tile indexing so partial edge tiles
+	// still receive every splat that can contribute to on-screen pixels.
+	const float2 FootprintMin = max(ScreenCenter - BinExtent, float2(ViewMin));
+	const float2 FootprintMax = min(ScreenCenter + BinExtent, float2(ViewMaxPixel));
+
+	const int2 MinPixel = int2(floor(FootprintMin));
+	const int2 MaxPixel = int2(ceil(FootprintMax));
 
 	TileMin = int2(
-		max(0, (MinPixel.x - ViewMin.x) / GAUSSIAN_TILE_SIZE),
-		max(0, (MinPixel.y - ViewMin.y) / GAUSSIAN_TILE_SIZE));
+		max(0, (MinPixel.x - ViewMin.x) / int(GAUSSIAN_TILE_SIZE)),
+		max(0, (MinPixel.y - ViewMin.y) / int(GAUSSIAN_TILE_SIZE)));
 	TileMax = int2(
-		min((int)NumTilesX - 1, (MaxPixel.x - ViewMin.x) / GAUSSIAN_TILE_SIZE),
-		min((int)NumTilesY - 1, (MaxPixel.y - ViewMin.y) / GAUSSIAN_TILE_SIZE));
+		min((int)NumTilesX - 1, (MaxPixel.x - ViewMin.x) / int(GAUSSIAN_TILE_SIZE)),
+		min((int)NumTilesY - 1, (MaxPixel.y - ViewMin.y) / int(GAUSSIAN_TILE_SIZE)));
 }
 
 /** Per-tile list entry: x = near-to-far depth key, y = global sorted index. */
@@ -426,14 +417,50 @@ float ComputeGaussianDepth01(float4 ClipPosition)
 	return 1.0 - NdcDepth;
 }
 
+/** Quantize depth before float->uint to reduce temporal flicker when the camera moves slightly. */
+float QuantizeGaussianDepth01(float Depth01)
+{
+	return floor(Depth01 * 16383.0) / 16383.0;
+}
+
 uint EncodeGaussianNearToFarKey(float4 ClipPosition)
 {
-	return asuint(ComputeGaussianDepth01(ClipPosition));
+	const float Depth01 = QuantizeGaussianDepth01(ComputeGaussianDepth01(ClipPosition));
+	return asuint(Depth01);
 }
 
 uint EncodeGaussianFarToNearKey(float4 ClipPosition)
 {
-	return asuint(1.0 - ComputeGaussianDepth01(ClipPosition));
+	const float Depth01 = QuantizeGaussianDepth01(ComputeGaussianDepth01(ClipPosition));
+	return asuint(1.0 - Depth01);
+}
+
+/** 64-bit radix digit: low 32 bits = GaussianIndex tie-break, high 32 = depth key. */
+uint GetGaussianSortDigit(uint2 KeyPair, uint DigitShift)
+{
+	if (DigitShift < 32u)
+	{
+		return (KeyPair.y >> DigitShift) & 0xFu;
+	}
+	return (KeyPair.x >> (DigitShift - 32u)) & 0xFu;
+}
+
+bool GaussianSortKeyLess(uint2 A, uint2 B)
+{
+	if (A.x != B.x)
+	{
+		return A.x < B.x;
+	}
+	return A.y < B.y;
+}
+
+bool GaussianSortKeyGreater(uint2 A, uint2 B)
+{
+	if (A.x != B.x)
+	{
+		return A.x > B.x;
+	}
+	return A.y > B.y;
 }
 
 float ComputeScreenRadius(
