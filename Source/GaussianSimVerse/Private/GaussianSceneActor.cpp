@@ -21,11 +21,13 @@ AGaussianSceneActor::AGaussianSceneActor()
 	EditorSprite = CreateDefaultSubobject<UBillboardComponent>(TEXT("EditorSprite"));
 	EditorSprite->SetupAttachment(SceneRoot);
 	EditorSprite->SetHiddenInGame(true);
-	EditorSprite->SetRelativeScale3D(FVector(2.0f));
+	EditorSprite->SetVisibility(false);
 
 	BoundsVisual = CreateDefaultSubobject<UBoxComponent>(TEXT("BoundsVisual"));
 	BoundsVisual->SetupAttachment(SceneRoot);
-	BoundsVisual->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	BoundsVisual->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+	BoundsVisual->SetCollisionResponseToAllChannels(ECR_Ignore);
+	BoundsVisual->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
 	BoundsVisual->SetGenerateOverlapEvents(false);
 	BoundsVisual->SetHiddenInGame(true);
 	BoundsVisual->ShapeColor = FColor(80, 200, 255);
@@ -43,7 +45,7 @@ void AGaussianSceneActor::PostRegisterAllComponents()
 {
 	Super::PostRegisterAllComponents();
 	RebuildGaussianScene();
-	TryRegisterScene();
+	RefreshRenderRegistration();
 }
 
 void AGaussianSceneActor::PostUnregisterAllComponents()
@@ -57,7 +59,7 @@ void AGaussianSceneActor::SetGaussianAsset(UGaussianAsset* InAsset)
 	GaussianAsset = InAsset;
 	SnapActorToAssetOrigin();
 	RebuildGaussianScene();
-	TryRegisterScene();
+	RefreshRenderRegistration();
 }
 
 void AGaussianSceneActor::SyncSceneSettings()
@@ -87,20 +89,20 @@ void AGaussianSceneActor::OnConstruction(const FTransform& Transform)
 		}
 		else
 		{
-			TryRegisterScene();
+			RefreshRenderRegistration();
 		}
 		return;
 	}
 
 	RebuildGaussianScene();
-	TryRegisterScene();
+	RefreshRenderRegistration();
 }
 
 void AGaussianSceneActor::BeginPlay()
 {
 	Super::BeginPlay();
 	RebuildGaussianScene();
-	RegisterScene();
+	RefreshRenderRegistration();
 }
 
 void AGaussianSceneActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -115,7 +117,27 @@ void AGaussianSceneActor::BeginDestroy()
 	Super::BeginDestroy();
 }
 
+void AGaussianSceneActor::SetActorHiddenInGame(bool bNewHidden)
+{
+	const bool bWasHidden = IsHidden();
+	Super::SetActorHiddenInGame(bNewHidden);
+	if (bWasHidden != IsHidden())
+	{
+		RefreshRenderRegistration();
+	}
+}
+
 #if WITH_EDITOR
+void AGaussianSceneActor::SetIsTemporarilyHiddenInEditor(bool bIsHidden)
+{
+	const bool bWasHidden = IsTemporarilyHiddenInEditor();
+	Super::SetIsTemporarilyHiddenInEditor(bIsHidden);
+	if (bWasHidden != IsTemporarilyHiddenInEditor())
+	{
+		RefreshRenderRegistration();
+	}
+}
+
 void AGaussianSceneActor::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);
@@ -125,12 +147,12 @@ void AGaussianSceneActor::PostEditChangeProperty(FPropertyChangedEvent& Property
 	{
 		SnapActorToAssetOrigin();
 		RebuildGaussianScene();
-		TryRegisterScene();
+		RefreshRenderRegistration();
 	}
 	else if (PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, bEnableRendering))
 	{
 		RebuildGaussianScene();
-		TryRegisterScene();
+		RefreshRenderRegistration();
 	}
 	else if (PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, ShBandOverride)
 		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, Colors)
@@ -169,6 +191,53 @@ void AGaussianSceneActor::Destroyed()
 }
 #endif
 
+bool AGaussianSceneActor::ShouldRenderGaussian() const
+{
+	if (!bEnableRendering || !GaussianAsset || !GaussianAsset->IsValidForRendering())
+	{
+		return false;
+	}
+
+	if (IsHidden())
+	{
+		return false;
+	}
+
+#if WITH_EDITOR
+	if (IsTemporarilyHiddenInEditor())
+	{
+		return false;
+	}
+#endif
+
+	return true;
+}
+
+void AGaussianSceneActor::RefreshRenderRegistration()
+{
+	if (!GaussianScene)
+	{
+		return;
+	}
+
+	GaussianScene->bEnableRendering = ShouldRenderGaussian();
+	if (!GaussianScene->bEnableRendering)
+	{
+		UnregisterScene();
+		return;
+	}
+
+	if (!GaussianScene->IsRegisteredWithRenderer())
+	{
+		TryRegisterScene();
+		return;
+	}
+
+	GaussianScene->WorldTransform = GetActorTransform();
+	SyncSceneSettings();
+	FGaussianRenderer::Get().MarkSceneDirty(GaussianScene);
+}
+
 void AGaussianSceneActor::SnapActorToAssetOrigin()
 {
 	if (!GaussianAsset || !GaussianAsset->IsValidForRendering())
@@ -198,7 +267,7 @@ void AGaussianSceneActor::RebuildGaussianScene()
 	}
 
 	GaussianScene->WorldTransform = GetActorTransform();
-	GaussianScene->bEnableRendering = bEnableRendering;
+	GaussianScene->bEnableRendering = ShouldRenderGaussian();
 	SyncSceneSettings();
 	GaussianScene->Chunks.Reset();
 
@@ -217,7 +286,7 @@ void AGaussianSceneActor::RebuildGaussianScene()
 
 void AGaussianSceneActor::TryRegisterScene()
 {
-	if (!GetWorld() || !GaussianScene || GaussianScene->Chunks.Num() == 0 || !bEnableRendering)
+	if (!GetWorld() || !GaussianScene || GaussianScene->Chunks.Num() == 0 || !ShouldRenderGaussian())
 	{
 		return;
 	}
@@ -227,7 +296,7 @@ void AGaussianSceneActor::TryRegisterScene()
 
 void AGaussianSceneActor::RegisterScene()
 {
-	if (!GaussianScene || GaussianScene->Chunks.Num() == 0 || !bEnableRendering || !GaussianAsset)
+	if (!GaussianScene || GaussianScene->Chunks.Num() == 0 || !ShouldRenderGaussian() || !GaussianAsset)
 	{
 		return;
 	}
@@ -255,12 +324,9 @@ void AGaussianSceneActor::UpdateBoundsVisual()
 	{
 		const FVector Extent = FVector(GaussianAsset->Bounds.Extent);
 		BoundsVisual->SetBoxExtent(Extent, false);
-		BoundsVisual->SetVisibility(true);
 	}
-	else
-	{
-		BoundsVisual->SetVisibility(false);
-	}
+
+	BoundsVisual->SetVisibility(false);
 }
 
 void AGaussianSceneActor::UnregisterScene()

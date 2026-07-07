@@ -29,6 +29,7 @@ public class GaussianSimVerseEditor : ModuleRules
 			"FreeImage",
 			"LevelEditor",
 			"ImageWrapper",
+			"AssetRegistry",
 		});
 	}
 }

@@ -4,6 +4,7 @@
 #include "GaussianImporter.h"
 #include "GaussianAsset.h"
 #include "GaussianAssetTypeActions.h"
+#include "GaussianSceneActorFactory.h"
 #include "Import/GaussianPlyReader.h"
 #include "Import/GaussianSplatReader.h"
 #include "Import/GaussianSogReader.h"
@@ -11,12 +12,15 @@
 #include "Import/GaussianImportUtils.h"
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
+#include "ActorFactories/ActorFactory.h"
 #include "Math/UnrealMathUtility.h"
 #include "Misc/Paths.h"
+#include "Editor.h"
 
 #define LOCTEXT_NAMESPACE "FGaussianSimVerseEditorModule"
 
 static TSharedPtr<FAssetTypeActions_GaussianAsset> GaussianAssetTypeActions;
+static TObjectPtr<UActorFactory> GaussianSceneActorFactoryInstance = nullptr;
 
 namespace
 {
@@ -66,11 +70,35 @@ void FGaussianSimVerseEditorModule::StartupModule()
 	IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools")).Get();
 	AssetTools.RegisterAssetTypeActions(GaussianAssetTypeActions.ToSharedRef());
 
+	if (GEditor)
+	{
+		const bool bAlreadyRegistered = GEditor->ActorFactories.ContainsByPredicate([](const UActorFactory* Factory)
+		{
+			return Factory && Factory->GetClass() == UGaussianSceneActorFactory::StaticClass();
+		});
+
+		if (!bAlreadyRegistered)
+		{
+			GaussianSceneActorFactoryInstance = NewObject<UGaussianSceneActorFactory>(GetTransientPackage());
+			if (GaussianSceneActorFactoryInstance)
+			{
+				GEditor->ActorFactories.Add(GaussianSceneActorFactoryInstance);
+			}
+		}
+
+	}
+
 	UE_LOG(LogTemp, Log, TEXT("GaussianSimVerseEditor module started"));
 }
 
 void FGaussianSimVerseEditorModule::ShutdownModule()
 {
+	if (GEditor && GaussianSceneActorFactoryInstance)
+	{
+		GEditor->ActorFactories.RemoveSingleSwap(GaussianSceneActorFactoryInstance);
+		GaussianSceneActorFactoryInstance = nullptr;
+	}
+
 	if (FModuleManager::Get().IsModuleLoaded(TEXT("AssetTools")) && GaussianAssetTypeActions.IsValid())
 	{
 		IAssetTools& AssetTools = FModuleManager::GetModuleChecked<FAssetToolsModule>(TEXT("AssetTools")).Get();

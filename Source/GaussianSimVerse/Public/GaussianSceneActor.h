@@ -13,8 +13,7 @@ class UGaussianChunk;
 
 /**
  * Places a Gaussian splat asset in the level and registers it with the GPU renderer.
- * Drag the data asset into the level is NOT supported — use right-click "Place Gaussian Scene in Level"
- * or add this actor from the Place Actors panel (Gaussian SimVerse category).
+ * Supports direct drag-drop of GaussianAsset into the level viewport.
  */
 UCLASS(Blueprintable, meta = (DisplayName = "Gaussian Scene"))
 class GAUSSIANSIMVERSE_API AGaussianSceneActor : public AActor
@@ -58,13 +57,17 @@ protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void BeginDestroy() override;
+	virtual void SetActorHiddenInGame(bool bNewHidden) override;
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 	virtual void PostEditMove(bool bFinished) override;
 	virtual void Destroyed() override;
+	virtual void SetIsTemporarilyHiddenInEditor(bool bIsHidden) override;
 #endif
 
 private:
+	bool ShouldRenderGaussian() const;
+	void RefreshRenderRegistration();
 	void RebuildGaussianScene();
 	void SyncSceneSettings();
 	void TryRegisterScene();

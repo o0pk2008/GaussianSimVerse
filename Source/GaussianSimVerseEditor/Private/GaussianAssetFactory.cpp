@@ -3,7 +3,72 @@
 #include "GaussianAssetFactory.h"
 #include "GaussianImporter.h"
 #include "GaussianAsset.h"
+#include "GaussianSceneActor.h"
+#include "Engine/Blueprint.h"
+#include "Kismet2/KismetEditorUtilities.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "Misc/PackageName.h"
 #include "Misc/Paths.h"
+
+namespace
+{
+	void CreateGaussianSceneActorBlueprintAsset(UGaussianAsset* Asset, FFeedbackContext* Warn)
+	{
+		if (!Asset)
+		{
+			return;
+		}
+
+		const FString AssetPackageName = Asset->GetOutermost()->GetName();
+		const FString AssetFolderPath = FPackageName::GetLongPackagePath(AssetPackageName);
+		const FString BlueprintName = FString::Printf(TEXT("%s_SceneActor"), *Asset->GetName());
+		const FString BlueprintPackagePath = AssetFolderPath / BlueprintName;
+
+		if (FindObject<UBlueprint>(nullptr, *BlueprintPackagePath) != nullptr)
+		{
+			return;
+		}
+
+		UPackage* BlueprintPackage = CreatePackage(*BlueprintPackagePath);
+		if (!BlueprintPackage)
+		{
+			if (Warn)
+			{
+				Warn->Logf(ELogVerbosity::Warning, TEXT("Failed to create package for GaussianSceneActor blueprint: %s"), *BlueprintPackagePath);
+			}
+			return;
+		}
+
+		UBlueprint* Blueprint = FKismetEditorUtilities::CreateBlueprint(
+			AGaussianSceneActor::StaticClass(),
+			BlueprintPackage,
+			*BlueprintName,
+			BPTYPE_Normal,
+			UBlueprint::StaticClass(),
+			UBlueprintGeneratedClass::StaticClass(),
+			NAME_None);
+		if (!Blueprint)
+		{
+			return;
+		}
+
+		// Ensure generated class/CDO exist before writing defaults.
+		FKismetEditorUtilities::CompileBlueprint(Blueprint);
+
+		if (AGaussianSceneActor* CDO = Cast<AGaussianSceneActor>(Blueprint->GeneratedClass ? Blueprint->GeneratedClass->GetDefaultObject() : nullptr))
+		{
+			CDO->Modify();
+			CDO->GaussianAsset = Asset;
+			CDO->PostEditChange();
+			FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+		}
+
+		Blueprint->MarkPackageDirty();
+		BlueprintPackage->MarkPackageDirty();
+		FAssetRegistryModule::AssetCreated(Blueprint);
+	}
+}
 
 UGaussianAssetFactory::UGaussianAssetFactory()
 {
@@ -63,6 +128,7 @@ UObject* UGaussianAssetFactory::FactoryCreateFile(
 	// Defer GPU upload until PIE / scene actor registration — importing can be millions of splats.
 	UE_LOG(LogTemp, Log, TEXT("Gaussian import complete: %d splats (%.1f MB payload)"),
 		Asset->GaussianCount, Asset->GetPayloadSizeMB());
+	CreateGaussianSceneActorBlueprintAsset(Asset, Warn);
 
 	return Asset;
 }
