@@ -26,6 +26,10 @@ uint RenderShDegree;
 uint ImportedShDegree;
 uint bHasShCoefficients;
 float3 CameraWorldPosition;
+float3 GaussianClrOffset;
+float3 GaussianClrScaleRGB;
+float GaussianSaturation;
+float GaussianTransparencyMultiplier;
 
 StructuredBuffer<uint> SortedIndices;
 StructuredBuffer<uint> VisibleCountBuffer;
@@ -147,7 +151,10 @@ void MainVS(
 		ImportedShDegree,
 		bHasShCoefficients,
 		WorldViewDir,
-		Splat.Color.rgb);
+		Splat.Color.rgb,
+		GaussianClrOffset,
+		GaussianClrScaleRGB,
+		GaussianSaturation);
 }
 
 float4 MainPS(FGaussianSplatVSToPS Input) : SV_Target0
@@ -164,7 +171,8 @@ float4 MainPS(FGaussianSplatVSToPS Input) : SV_Target0
 		Input.InvConic,
 		Input.EffectiveOpacity,
 		GaussianCutoffK,
-		bDebugOverlay);
+		bDebugOverlay,
+		GaussianTransparencyMultiplier);
 	if (Alpha < GaussianAlphaCutoff)
 	{
 		discard;

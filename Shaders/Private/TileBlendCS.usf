@@ -34,6 +34,10 @@ uint RenderShDegree;
 uint ImportedShDegree;
 uint bHasShCoefficients;
 float3 CameraWorldPosition;
+float3 GaussianClrOffset;
+float3 GaussianClrScaleRGB;
+float GaussianSaturation;
+float GaussianTransparencyMultiplier;
 StructuredBuffer<float> GaussianShCoeffs;
 
 #ifndef GAUSSIAN_TILE_BLEND_BATCH
@@ -90,7 +94,7 @@ bool BlendTileSplat(
 		return false;
 	}
 
-	const float Alpha = EvaluateSplatAlphaEllipse(PixelCenter, ScreenCenter, InvConic, EffectiveOpacity, GaussianCutoffK, bDebugOverlay);
+	const float Alpha = EvaluateSplatAlphaEllipse(PixelCenter, ScreenCenter, InvConic, EffectiveOpacity, GaussianCutoffK, bDebugOverlay, GaussianTransparencyMultiplier);
 	if (Alpha < GaussianAlphaCutoff)
 	{
 		return false;
@@ -110,7 +114,10 @@ bool BlendTileSplat(
 			ImportedShDegree,
 			bHasShCoefficients,
 			WorldViewDir,
-			Splat.Color.rgb);
+			Splat.Color.rgb,
+			GaussianClrOffset,
+			GaussianClrScaleRGB,
+			GaussianSaturation);
 	}
 	else
 	{

@@ -27,6 +27,7 @@ struct GAUSSIANSIMVERSE_API FGaussianRDGBufferBinding
 	uint32 ImportedShDegree = 0;
 	uint32 RenderShDegree = 3;
 	uint32 bHasShCoefficients = 0;
+	FGaussianColorGradeGPU ColorGrade;
 	FRDGBufferSRVRef ShCoefficientsSRV = nullptr;
 };
 

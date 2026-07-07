@@ -26,6 +26,10 @@ uint RenderShDegree;
 uint ImportedShDegree;
 uint bHasShCoefficients;
 float3 CameraWorldPosition;
+float3 GaussianClrOffset;
+float3 GaussianClrScaleRGB;
+float GaussianSaturation;
+float GaussianTransparencyMultiplier;
 
 StructuredBuffer<uint> SortedIndices;
 StructuredBuffer<uint> VisibleCountBuffer;
@@ -112,7 +116,7 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 
 			if (bDebugOverlay == 0u)
 			{
-				Alpha = EvaluateSplatAlphaEllipse(float2(X, Y) + 0.5, ScreenCenter, InvConic, EffectiveOpacity, GaussianCutoffK, bDebugOverlay);
+				Alpha = EvaluateSplatAlphaEllipse(float2(X, Y) + 0.5, ScreenCenter, InvConic, EffectiveOpacity, GaussianCutoffK, bDebugOverlay, GaussianTransparencyMultiplier);
 				const float3 WorldViewDir = ComputeGaussianWorldViewDir(
 					Splat.Position,
 					LocalToWorldMatrix,
@@ -124,7 +128,10 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 					ImportedShDegree,
 					bHasShCoefficients,
 					WorldViewDir,
-					Splat.Color.rgb);
+					Splat.Color.rgb,
+					GaussianClrOffset,
+					GaussianClrScaleRGB,
+					GaussianSaturation);
 				if (Alpha < GaussianAlphaCutoff)
 				{
 					continue;
@@ -132,7 +139,7 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 			}
 			else
 			{
-				Alpha = EvaluateSplatAlphaEllipse(float2(X, Y) + 0.5, ScreenCenter, InvConic, EffectiveOpacity, GaussianCutoffK, bDebugOverlay);
+				Alpha = EvaluateSplatAlphaEllipse(float2(X, Y) + 0.5, ScreenCenter, InvConic, EffectiveOpacity, GaussianCutoffK, bDebugOverlay, GaussianTransparencyMultiplier);
 				if (Alpha < GaussianAlphaCutoff)
 				{
 					continue;

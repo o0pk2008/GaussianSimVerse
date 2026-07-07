@@ -60,6 +60,17 @@ void AGaussianSceneActor::SetGaussianAsset(UGaussianAsset* InAsset)
 	TryRegisterScene();
 }
 
+void AGaussianSceneActor::SyncSceneSettings()
+{
+	if (!GaussianScene)
+	{
+		return;
+	}
+
+	GaussianScene->ShBand = ShBandOverride;
+	GaussianScene->Colors = Colors;
+}
+
 void AGaussianSceneActor::OnConstruction(const FTransform& Transform)
 {
 	Super::OnConstruction(Transform);
@@ -67,11 +78,7 @@ void AGaussianSceneActor::OnConstruction(const FTransform& Transform)
 	if (GaussianScene && GaussianAsset && GaussianAsset->IsValidForRendering())
 	{
 		GaussianScene->WorldTransform = GetActorTransform();
-		GaussianScene->SplatScale = SplatScaleOverride;
-		GaussianScene->AlphaCullThreshold = AlphaCullThresholdOverride;
-		GaussianScene->CutoffK = CutoffKOverride;
-		GaussianScene->CovarianceDilation = CovarianceDilationOverride;
-		GaussianScene->ShBand = ShBandOverride;
+		SyncSceneSettings();
 		UpdateBoundsVisual();
 
 		if (GaussianScene->IsRegisteredWithRenderer())
@@ -125,23 +132,19 @@ void AGaussianSceneActor::PostEditChangeProperty(FPropertyChangedEvent& Property
 		RebuildGaussianScene();
 		TryRegisterScene();
 	}
-	else if (PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, SplatScaleOverride)
-		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, AlphaCullThresholdOverride)
-		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, CutoffKOverride)
-		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, CovarianceDilationOverride)
-		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, ShBandOverride))
+	else if (PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, ShBandOverride)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, Colors)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(FGaussianColorAdjustment, Temperature)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(FGaussianColorAdjustment, Saturation)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(FGaussianColorAdjustment, Brightness)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(FGaussianColorAdjustment, BlackPoint)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(FGaussianColorAdjustment, WhitePoint)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(FGaussianColorAdjustment, Transparency))
 	{
-		if (GaussianScene)
+		SyncSceneSettings();
+		if (GaussianScene && GaussianScene->IsRegisteredWithRenderer())
 		{
-			GaussianScene->SplatScale = SplatScaleOverride;
-			GaussianScene->AlphaCullThreshold = AlphaCullThresholdOverride;
-			GaussianScene->CutoffK = CutoffKOverride;
-			GaussianScene->CovarianceDilation = CovarianceDilationOverride;
-			GaussianScene->ShBand = ShBandOverride;
-			if (GaussianScene->IsRegisteredWithRenderer())
-			{
-				FGaussianRenderer::Get().MarkSceneDirty(GaussianScene);
-			}
+			FGaussianRenderer::Get().MarkSceneDirty(GaussianScene);
 		}
 	}
 }
@@ -196,11 +199,7 @@ void AGaussianSceneActor::RebuildGaussianScene()
 
 	GaussianScene->WorldTransform = GetActorTransform();
 	GaussianScene->bEnableRendering = bEnableRendering;
-	GaussianScene->SplatScale = SplatScaleOverride;
-	GaussianScene->AlphaCullThreshold = AlphaCullThresholdOverride;
-	GaussianScene->CutoffK = CutoffKOverride;
-	GaussianScene->CovarianceDilation = CovarianceDilationOverride;
-	GaussianScene->ShBand = ShBandOverride;
+	SyncSceneSettings();
 	GaussianScene->Chunks.Reset();
 
 	if (GaussianAsset && GaussianAsset->IsValidForRendering())
@@ -241,11 +240,7 @@ void AGaussianSceneActor::RegisterScene()
 
 	GaussianAsset->InitGPUResources();
 	GaussianScene->WorldTransform = GetActorTransform();
-	GaussianScene->SplatScale = SplatScaleOverride;
-	GaussianScene->AlphaCullThreshold = AlphaCullThresholdOverride;
-	GaussianScene->CutoffK = CutoffKOverride;
-	GaussianScene->CovarianceDilation = CovarianceDilationOverride;
-	GaussianScene->ShBand = ShBandOverride;
+	SyncSceneSettings();
 	GaussianScene->RegisterWithRenderer();
 }
 

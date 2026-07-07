@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "GaussianChunk.h"
+#include "GaussianTypes.h"
 #include "GaussianScene.generated.h"
 
 class UGaussianAsset;
@@ -32,20 +33,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Gaussian")
 	bool bEnableRendering = true;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Gaussian|Rendering")
+	/** Driven by AGaussianSceneActor; not exposed in the actor details panel. */
 	float SplatScale = 1.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Gaussian|Rendering")
 	float AlphaCullThreshold = 0.007843137f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Gaussian|Rendering")
 	float CutoffK = 7.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Gaussian|Rendering")
 	float CovarianceDilation = 0.3f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Rendering", meta = (DisplayName = "SH Band"))
 	EGaussianSHBand ShBand = EGaussianSHBand::SH3;
+
+	FGaussianColorAdjustment Colors;
 
 	uint32 GetTotalGaussianCount() const;
 	FGaussianBounds GetCombinedBounds() const;

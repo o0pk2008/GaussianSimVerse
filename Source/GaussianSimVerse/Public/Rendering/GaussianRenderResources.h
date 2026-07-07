@@ -35,6 +35,7 @@ struct GAUSSIANSIMVERSE_API FGaussianSceneProxy
 	float CutoffK = 7.0f;
 	float CovarianceDilation = 0.3f;
 	EGaussianSHBand ShBand = EGaussianSHBand::SH3;
+	FGaussianColorGradeGPU ColorGrade;
 	TArray<FGaussianChunkRenderData> Chunks;
 };
 

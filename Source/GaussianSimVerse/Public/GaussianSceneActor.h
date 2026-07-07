@@ -33,22 +33,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Gaussian")
 	bool bEnableRendering = true;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Rendering", meta = (ClampMin = "0.1", UIMin = "0.1", UIMax = "4.0"))
-	float SplatScaleOverride = 1.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Rendering", meta = (ClampMin = "0.0", ClampMax = "1.0", UIMin = "0.0", UIMax = "0.05"))
-	float AlphaCullThresholdOverride = 0.007843137f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Rendering", meta = (ClampMin = "0.25", UIMin = "1.0", UIMax = "12.0"))
-	float CutoffKOverride = 7.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Rendering", meta = (ClampMin = "0.0", UIMin = "0.0", UIMax = "1.0"))
-	float CovarianceDilationOverride = 0.3f;
-
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Rendering", meta = (DisplayName = "SH Band"))
 	EGaussianSHBand ShBandOverride = EGaussianSHBand::SH3;
 
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Gaussian")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Colors", meta = (ShowOnlyInnerProperties))
+	FGaussianColorAdjustment Colors;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Gaussian")
 	TObjectPtr<UGaussianScene> GaussianScene;
 
 	UPROPERTY(VisibleAnywhere, Category = "Gaussian")
@@ -75,6 +66,7 @@ protected:
 
 private:
 	void RebuildGaussianScene();
+	void SyncSceneSettings();
 	void TryRegisterScene();
 	void RegisterScene();
 	void UnregisterScene();

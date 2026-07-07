@@ -22,6 +22,7 @@ FGaussianSceneProxy::FGaussianSceneProxy(const UGaussianScene* InScene)
 	CutoffK = InScene->CutoffK;
 	CovarianceDilation = InScene->CovarianceDilation;
 	ShBand = InScene->ShBand;
+	ColorGrade = FGaussianColorGradeGPU::FromAdjustment(InScene->Colors);
 
 	Chunks.Reserve(InScene->Chunks.Num());
 	uint32 ChunkIndex = 0;

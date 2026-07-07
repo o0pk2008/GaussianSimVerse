@@ -30,6 +30,57 @@ constexpr int32 GaussianShRestCoefficientCount = 45;
 constexpr int32 GaussianShDcCoefficientCount = 3;
 constexpr int32 GaussianShCoefficientsPerSplat = GaussianShDcCoefficientCount + GaussianShRestCoefficientCount;
 
+/** SuperSplat-style per-scene color grading (UI transparency is log-space; shader uses exp). */
+USTRUCT(BlueprintType)
+struct GAUSSIANSIMVERSE_API FGaussianColorAdjustment
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Colors", meta = (ClampMin = "-0.5", ClampMax = "0.5", UIMin = "-0.5", UIMax = "0.5"))
+	float Temperature = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Colors", meta = (ClampMin = "0.0", ClampMax = "2.0", UIMin = "0.0", UIMax = "2.0"))
+	float Saturation = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Colors", meta = (ClampMin = "-1.0", ClampMax = "1.0", UIMin = "-1.0", UIMax = "1.0"))
+	float Brightness = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Colors", meta = (ClampMin = "0.0", ClampMax = "0.5", UIMin = "0.0", UIMax = "0.5"))
+	float BlackPoint = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Colors", meta = (ClampMin = "0.0", ClampMax = "1.0", UIMin = "0.0", UIMax = "1.0"))
+	float WhitePoint = 1.0f;
+
+	/** Log-space transparency slider (0 = neutral; shader multiplier = exp(value)). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Colors", meta = (ClampMin = "-6.0", ClampMax = "6.0", UIMin = "-6.0", UIMax = "6.0"))
+	float Transparency = 0.0f;
+};
+
+/** GPU uniforms derived from FGaussianColorAdjustment (SuperSplat clrOffset/clrScale/saturation). */
+struct FGaussianColorGradeGPU
+{
+	FVector3f ClrOffset = FVector3f::ZeroVector;
+	FVector3f ClrScaleRGB = FVector3f::OneVector;
+	float Saturation = 1.0f;
+	float TransparencyMultiplier = 1.0f;
+
+	static FGaussianColorGradeGPU FromAdjustment(const FGaussianColorAdjustment& Adjustment)
+	{
+		const float Range = FMath::Max(Adjustment.WhitePoint - Adjustment.BlackPoint, KINDA_SMALL_NUMBER);
+		const float Scale = 1.0f / Range;
+
+		FGaussianColorGradeGPU Out;
+		Out.ClrOffset = FVector3f(-Adjustment.BlackPoint + Adjustment.Brightness);
+		Out.ClrScaleRGB = FVector3f(
+			Scale * (1.0f + Adjustment.Temperature),
+			Scale,
+			Scale * (1.0f - Adjustment.Temperature));
+		Out.Saturation = Adjustment.Saturation;
+		Out.TransparencyMultiplier = FMath::Exp(Adjustment.Transparency);
+		return Out;
+	}
+};
+
 /** Per-Gaussian attributes stored on GPU (Phase 2+). Layout matches shader GaussianCommon.ush. */
 USTRUCT(BlueprintType)
 struct GAUSSIANSIMVERSE_API FGaussianSplatData

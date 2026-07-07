@@ -18,6 +18,19 @@ namespace GaussianRenderGraphPrivate
 	static constexpr uint32 SplatsPerRasterBatch = 2048;
 	static constexpr uint32 SplatsPerDrawBatch = 65535;
 
+	static void FillGaussianColorGradeUniforms(
+		FVector3f& OutClrOffset,
+		FVector3f& OutClrScaleRGB,
+		float& OutSaturation,
+		float& OutTransparencyMultiplier,
+		const FGaussianColorGradeGPU& ColorGrade)
+	{
+		OutClrOffset = ColorGrade.ClrOffset;
+		OutClrScaleRGB = ColorGrade.ClrScaleRGB;
+		OutSaturation = ColorGrade.Saturation;
+		OutTransparencyMultiplier = ColorGrade.TransparencyMultiplier;
+	}
+
 	static void FillGaussianSplatDrawParameters(
 		FGaussianSplatDrawSharedParameters& OutParameters,
 		const FMatrix44f& LocalToWorldMatrix,
@@ -42,6 +55,7 @@ namespace GaussianRenderGraphPrivate
 		uint32 ImportedShDegree,
 		uint32 bHasShCoefficients,
 		const FVector3f& CameraWorldPosition,
+		const FGaussianColorGradeGPU& ColorGrade,
 		FRDGBufferSRVRef SortedIndicesSRV,
 		FRDGBufferSRVRef VisibleCountSRV,
 		FRDGBufferSRVRef GaussianSplatsSRV,
@@ -69,6 +83,12 @@ namespace GaussianRenderGraphPrivate
 		OutParameters.ImportedShDegree = ImportedShDegree;
 		OutParameters.bHasShCoefficients = bHasShCoefficients;
 		OutParameters.CameraWorldPosition = CameraWorldPosition;
+		FillGaussianColorGradeUniforms(
+			OutParameters.GaussianClrOffset,
+			OutParameters.GaussianClrScaleRGB,
+			OutParameters.GaussianSaturation,
+			OutParameters.GaussianTransparencyMultiplier,
+			ColorGrade);
 		OutParameters.SortedIndices = SortedIndicesSRV;
 		OutParameters.VisibleCountBuffer = VisibleCountSRV;
 		OutParameters.GaussianSplatsVec4 = GaussianSplatsSRV;
@@ -210,6 +230,7 @@ void FGaussianRenderGraph::AddGPUBufferUploadPasses(
 			Binding.CutoffK = SceneProxy.CutoffK;
 			Binding.CovarianceDilation = SceneProxy.CovarianceDilation;
 			Binding.RenderShDegree = static_cast<uint32>(SceneProxy.ShBand);
+			Binding.ColorGrade = SceneProxy.ColorGrade;
 
 			Chunk.GPUBuffer->CommitToGPU(GraphBuilder, Binding);
 
@@ -967,6 +988,12 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 			BlendParameters->ImportedShDegree = Binding.ImportedShDegree;
 			BlendParameters->bHasShCoefficients = Binding.bHasShCoefficients;
 			BlendParameters->CameraWorldPosition = CameraWorldPosition;
+			GaussianRenderGraphPrivate::FillGaussianColorGradeUniforms(
+				BlendParameters->GaussianClrOffset,
+				BlendParameters->GaussianClrScaleRGB,
+				BlendParameters->GaussianSaturation,
+				BlendParameters->GaussianTransparencyMultiplier,
+				Binding.ColorGrade);
 			BlendParameters->TileOffsets = TileOffsetsSRV;
 			BlendParameters->TileCounts = TileFillCounterSRV;
 			BlendParameters->TileSplats = TileSplatsSRV;
@@ -1016,6 +1043,7 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 					Binding.ImportedShDegree,
 					Binding.bHasShCoefficients,
 					CameraWorldPosition,
+					Binding.ColorGrade,
 					SortedIndicesSRV,
 					CullResult.VisibleCountSRV,
 					Binding.SplatSRV,
@@ -1063,6 +1091,12 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 				PassParameters->ImportedShDegree = Binding.ImportedShDegree;
 				PassParameters->bHasShCoefficients = Binding.bHasShCoefficients;
 				PassParameters->CameraWorldPosition = CameraWorldPosition;
+				GaussianRenderGraphPrivate::FillGaussianColorGradeUniforms(
+					PassParameters->GaussianClrOffset,
+					PassParameters->GaussianClrScaleRGB,
+					PassParameters->GaussianSaturation,
+					PassParameters->GaussianTransparencyMultiplier,
+					Binding.ColorGrade);
 				PassParameters->SortedIndices = SortedIndicesSRV;
 				PassParameters->VisibleCountBuffer = CullResult.VisibleCountSRV;
 				PassParameters->GaussianSplatsVec4 = Binding.SplatSRV;

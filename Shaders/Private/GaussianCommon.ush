@@ -260,6 +260,18 @@ float3 PrepareGaussianColorForScene(float3 Color)
 	return pow(Color, 2.2);
 }
 
+float3 ApplyGaussianColorGrade(float3 Color, float3 ClrOffset, float3 ClrScaleRGB, float Saturation)
+{
+	Color = Color * ClrScaleRGB + ClrOffset;
+	const float Grey = dot(Color, float3(0.299, 0.587, 0.114));
+	return Grey + (Color - Grey) * Saturation;
+}
+
+float ApplyGaussianTransparency(float Opacity, float TransparencyMultiplier)
+{
+	return saturate(Opacity * TransparencyMultiplier);
+}
+
 float3 EvaluateGaussianShRadiance(
 	StructuredBuffer<float> GaussianShCoeffs,
 	uint GaussianIndex,
@@ -267,12 +279,15 @@ float3 EvaluateGaussianShRadiance(
 	uint ImportedShDegree,
 	uint bHasShCoefficients,
 	float3 WorldViewDir,
-	float3 FallbackLinearRgb)
+	float3 FallbackLinearRgb,
+	float3 ClrOffset,
+	float3 ClrScaleRGB,
+	float Saturation)
 {
 	const uint Degree = min(RenderShDegree, ImportedShDegree);
 	if (bHasShCoefficients == 0u || Degree == 0u)
 	{
-		return PrepareGaussianColorForScene(FallbackLinearRgb);
+		return ApplyGaussianColorGrade(PrepareGaussianColorForScene(FallbackLinearRgb), ClrOffset, ClrScaleRGB, Saturation);
 	}
 
 	WorldViewDir = UeToPlyDirection(WorldViewDir);
@@ -338,7 +353,7 @@ float3 EvaluateGaussianShRadiance(
 		}
 	}
 
-	return PrepareGaussianColorForScene(rgb);
+	return ApplyGaussianColorGrade(PrepareGaussianColorForScene(rgb), ClrOffset, ClrScaleRGB, Saturation);
 }
 
 float3 ComputeGaussianWorldViewDir(
@@ -627,7 +642,7 @@ bool ProjectSplatEllipse(
 	return true;
 }
 
-float EvaluateSplatAlphaEllipse(float2 Pixel, float2 ScreenCenter, float3 InvConic, float Opacity, float CutoffK, uint bDebugOverlay)
+float EvaluateSplatAlphaEllipse(float2 Pixel, float2 ScreenCenter, float3 InvConic, float Opacity, float CutoffK, uint bDebugOverlay, float TransparencyMultiplier)
 {
 	const float2 Delta = Pixel - ScreenCenter;
 	const float Quad = InvConic.x * Delta.x * Delta.x + 2.0 * InvConic.y * Delta.x * Delta.y + InvConic.z * Delta.y * Delta.y;
@@ -642,7 +657,7 @@ float EvaluateSplatAlphaEllipse(float2 Pixel, float2 ScreenCenter, float3 InvCon
 	}
 
 	const float Gaussian = exp(-0.5 * Quad);
-	return saturate(Opacity * Gaussian);
+	return ApplyGaussianTransparency(saturate(Opacity * Gaussian), TransparencyMultiplier);
 }
 
 bool ProjectSplatDisc(
