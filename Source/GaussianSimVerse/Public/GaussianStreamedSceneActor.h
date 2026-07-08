@@ -111,8 +111,10 @@ protected:
 private:
 	bool ShouldRenderGaussian() const;
 	void RefreshRenderRegistration();
-	void InitializeStreaming();
+	/** @param bForceRestart When false, keep resident chunks if already streaming the same asset. */
+	void InitializeStreaming(bool bForceRestart = false);
 	void ShutdownStreaming();
+	bool IsStreamingInitialized() const;
 	void SyncSceneSettings();
 	void TryRegisterScene();
 	void RegisterScene();
@@ -134,4 +136,6 @@ private:
 #endif
 
 	FGaussianStreamingManager StreamingManager;
+	/** True after a successful InitializeStreaming for the current StreamedSceneAsset. */
+	bool bStreamingInitialized = false;
 };

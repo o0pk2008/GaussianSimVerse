@@ -52,7 +52,8 @@ AGaussianStreamedSceneActor::AGaussianStreamedSceneActor()
 void AGaussianStreamedSceneActor::PostRegisterAllComponents()
 {
 	Super::PostRegisterAllComponents();
-	InitializeStreaming();
+	// Property edits can remount components — do not force a full stream restart.
+	InitializeStreaming(false);
 	RefreshRenderRegistration();
 	ApplyStreamingCVarOverrides();
 	StreamingManager.UpdateStreaming(GetStreamingViewOrigin(), GetStreamingViewDirection());
@@ -88,7 +89,8 @@ void AGaussianStreamedSceneActor::PostUnregisterAllComponents()
 	}
 #endif
 
-	ShutdownStreaming();
+	// Detach from renderer only. Do NOT ShutdownStreaming here: editor property edits
+	// (Debug Render, etc.) remount components and would wipe / reload every chunk.
 	UnregisterScene();
 	Super::PostUnregisterAllComponents();
 }
@@ -97,7 +99,7 @@ void AGaussianStreamedSceneActor::SetStreamedSceneAsset(UGaussianStreamedSceneAs
 {
 	StreamedSceneAsset = InAsset;
 	SnapActorToSceneOrigin();
-	InitializeStreaming();
+	InitializeStreaming(true);
 	RefreshRenderRegistration();
 	ApplyStreamingCVarOverrides();
 	StreamingManager.UpdateStreaming(GetStreamingViewOrigin(), GetStreamingViewDirection());
@@ -184,12 +186,8 @@ void AGaussianStreamedSceneActor::OnConstruction(const FTransform& Transform)
 	SyncSceneSettings();
 	ApplyStreamingCVarOverrides();
 	UpdateBoundsVisual();
-	// Do not InitializeStreaming here: property edits (including Debug Render) retrigger OnConstruction
-	// and would wipe resident chunks. Cold start / asset assign / BeginPlay handle init.
-	if (StreamedSceneAsset && StreamingManager.GetDesiredChunkCount() == 0 && StreamingManager.GetLoadedChunkCount() == 0)
-	{
-		InitializeStreaming();
-	}
+	// Property edits rerun construction scripts — never wipe resident streaming here.
+	InitializeStreaming(false);
 	RefreshRenderRegistration();
 }
 
@@ -197,10 +195,7 @@ void AGaussianStreamedSceneActor::BeginPlay()
 {
 	Super::BeginPlay();
 	ApplyStreamingCVarOverrides();
-	if (StreamedSceneAsset && StreamingManager.GetLoadedChunkCount() == 0)
-	{
-		InitializeStreaming();
-	}
+	InitializeStreaming(false);
 	RefreshRenderRegistration();
 }
 
@@ -253,7 +248,7 @@ void AGaussianStreamedSceneActor::PostEditChangeProperty(FPropertyChangedEvent& 
 	if (PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, StreamedSceneAsset))
 	{
 		SnapActorToSceneOrigin();
-		InitializeStreaming();
+		InitializeStreaming(true);
 		RefreshRenderRegistration();
 	}
 	else if (PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, bEnableRendering))
@@ -264,16 +259,11 @@ void AGaussianStreamedSceneActor::PostEditChangeProperty(FPropertyChangedEvent& 
 		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, bStreamingDebugOverlay)
 		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, DebugRenderMode))
 	{
-		// Debug toggles must not re-initialize streaming / reload resident chunks.
+		// Debug Render is a per-frame CVar tint — never restart streaming or rebuild proxies.
 		ApplyStreamingCVarOverrides();
 		if (bStreamingDebugOverlay)
 		{
 			DrawStreamingDebugOverlay(StreamingManager);
-		}
-		// Mark dirty so proxies pick up StreamingDebugRenderMode without dumping GPU/assets.
-		if (GaussianScene && GaussianScene->IsRegisteredWithRenderer())
-		{
-			FGaussianRenderer::Get().MarkSceneDirty(GaussianScene);
 		}
 	}
 	else if (PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, bApplyStreamingCVarOverrides)
@@ -379,7 +369,7 @@ void AGaussianStreamedSceneActor::RefreshRenderRegistration()
 	FGaussianRenderer::Get().MarkSceneDirty(GaussianScene);
 }
 
-void AGaussianStreamedSceneActor::InitializeStreaming()
+void AGaussianStreamedSceneActor::InitializeStreaming(bool bForceRestart)
 {
 	if (!GaussianScene)
 	{
@@ -388,19 +378,36 @@ void AGaussianStreamedSceneActor::InitializeStreaming()
 
 	if (!StreamedSceneAsset)
 	{
-		StreamingManager.Shutdown();
+		ShutdownStreaming();
+		return;
+	}
+
+	if (!bForceRestart
+		&& bStreamingInitialized
+		&& StreamingManager.GetLoadedChunkCount() > 0)
+	{
+		GaussianScene->WorldTransform = GetActorTransform();
+		SyncSceneSettings();
+		UpdateBoundsVisual();
 		return;
 	}
 
 	GaussianScene->WorldTransform = GetActorTransform();
 	SyncSceneSettings();
 	StreamingManager.Initialize(this, StreamedSceneAsset, GaussianScene);
+	bStreamingInitialized = true;
 	UpdateBoundsVisual();
+}
+
+bool AGaussianStreamedSceneActor::IsStreamingInitialized() const
+{
+	return bStreamingInitialized;
 }
 
 void AGaussianStreamedSceneActor::ShutdownStreaming()
 {
 	StreamingManager.Shutdown();
+	bStreamingInitialized = false;
 	if (GaussianScene)
 	{
 		GaussianScene->Chunks.Reset();
