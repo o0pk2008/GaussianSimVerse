@@ -278,7 +278,12 @@ void AGaussianSceneActor::RebuildGaussianScene()
 		LocalBounds.Origin = FVector3f::ZeroVector;
 		LocalBounds.Extent = GaussianAsset->Bounds.Extent;
 		GaussianChunk->LocalBounds = LocalBounds;
+		GaussianChunk->LoadState = EGaussianChunkLoadState::Loaded;
 		GaussianScene->Chunks.Add(GaussianChunk);
+	}
+	else if (GaussianChunk)
+	{
+		GaussianChunk->LoadState = EGaussianChunkLoadState::Unloaded;
 	}
 
 	UpdateBoundsVisual();

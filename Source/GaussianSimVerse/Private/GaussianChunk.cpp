@@ -5,5 +5,7 @@
 
 bool UGaussianChunk::IsLoaded() const
 {
-	return Asset != nullptr && Asset->IsValidForRendering();
+	return LoadState == EGaussianChunkLoadState::Loaded
+		&& Asset != nullptr
+		&& Asset->IsValidForRendering();
 }

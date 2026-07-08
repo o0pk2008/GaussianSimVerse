@@ -1,0 +1,41 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+// Build global depth sort keys from the unified splat buffer (same transforms as draw).
+
+#include "/Engine/Public/Platform.ush"
+#include "/Plugin/GaussianSimVerse/Private/GaussianCommon.ush"
+
+#pragma pack_matrix(row_major)
+
+float3 CameraViewDirection;
+float ViewDepthMin;
+float ViewDepthMax;
+StructuredBuffer<uint> TotalVisibleCount;
+StructuredBuffer<float4> UnifiedSplatsVec4;
+StructuredBuffer<uint> BindingIds;
+StructuredBuffer<float4> ChunkMatrixRows;
+RWStructuredBuffer<uint2> RWSortKeys;
+
+uint PaddedCount;
+
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	const uint GlobalIndex = DispatchThreadId.x;
+	if (GlobalIndex >= PaddedCount)
+	{
+		return;
+	}
+
+	const uint VisibleCount = TotalVisibleCount[0];
+	if (GlobalIndex >= VisibleCount)
+	{
+		return;
+	}
+
+	const uint BindingIndex = BindingIds[GlobalIndex];
+	const float4x4 LocalToWorldMatrix = LoadGaussianChunkMatrix(ChunkMatrixRows, BindingIndex);
+	const FGaussianSplatGPU Splat = LoadGaussianSplat(UnifiedSplatsVec4, GlobalIndex);
+	const float3 WorldPosition = mul(float4(Splat.Position, 1.0), LocalToWorldMatrix).xyz;
+	const uint SortKey = EncodeGaussianViewFarToNearKey(WorldPosition, CameraViewDirection, ViewDepthMin, ViewDepthMax);
+	RWSortKeys[GlobalIndex] = uint2(SortKey, GlobalIndex);
+}

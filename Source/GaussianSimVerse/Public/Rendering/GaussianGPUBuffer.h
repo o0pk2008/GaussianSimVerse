@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Rendering/GaussianGPUResources.h"
 #include "RenderGraphResources.h"
+#include "HAL/CriticalSection.h"
 
 class FGaussianGPUBuffer;
 
@@ -19,6 +20,7 @@ struct GAUSSIANSIMVERSE_API FGaussianRDGBufferBinding
 	uint32 NumGaussians = 0;
 	uint32 SceneId = INDEX_NONE;
 	uint32 ChunkIndex = INDEX_NONE;
+	int32 LodLevel = 0;
 	FMatrix LocalToWorld = FMatrix::Identity;
 	float SplatScale = 1.0f;
 	float AlphaCullThreshold = 0.007843137f;
@@ -81,6 +83,7 @@ private:
 	void EnsurePooledBuffers(uint32 InNumGaussians);
 	void UploadToPooledBuffers(FRDGBuilder& GraphBuilder);
 
+	mutable FCriticalSection DataLock;
 	TArray<FGaussianSplatGPU> SplatCPUData;
 	TArray<FVector4f> PositionCPUData;
 	TArray<float> ShCoefficientCPUData;

@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "GaussianTypes.h"
+#include "Streaming/GaussianLodTypes.h"
 #include "GaussianChunk.generated.h"
 
 class UGaussianAsset;
@@ -29,6 +30,11 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Gaussian")
 	int32 ActiveLOD = 0;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Gaussian|Streaming")
+	EGaussianChunkLoadState LoadState = EGaussianChunkLoadState::Unloaded;
+
+	FGaussianStreamChunkKey StreamingKey;
 
 	bool IsLoaded() const;
 };

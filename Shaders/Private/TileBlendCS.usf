@@ -4,12 +4,18 @@
 #include "/Engine/Public/Platform.ush"
 #include "/Plugin/GaussianSimVerse/Private/GaussianCommon.ush"
 
+#pragma pack_matrix(row_major)
+
 float4x4 LocalToWorldMatrix;
 float3 PreViewTranslation;
 float4x4 TranslatedViewMatrix;
 float4x4 TranslatedWorldToClip;
 float4 ViewportRect;
 float4 ViewRect;
+uint bUseGlobalChunkLookup;
+StructuredBuffer<uint> BindingIds;
+StructuredBuffer<float4> ChunkMatrixRows;
+StructuredBuffer<float4> ChunkBindingParams;
 StructuredBuffer<uint> TileOffsets;
 StructuredBuffer<uint> TileCounts;
 StructuredBuffer<uint2> TileSplats;
@@ -38,11 +44,39 @@ float3 GaussianClrOffset;
 float3 GaussianClrScaleRGB;
 float GaussianSaturation;
 float GaussianTransparencyMultiplier;
+uint StreamingDebugRenderMode;
 StructuredBuffer<float> GaussianShCoeffs;
 
 #ifndef GAUSSIAN_TILE_BLEND_BATCH
 #define GAUSSIAN_TILE_BLEND_BATCH 1024
 #endif
+
+void ResolveSplatBinding(
+	uint GaussianIndex,
+	out float4x4 OutLocalToWorld,
+	out FGaussianBindingRenderParams OutBindingParams)
+{
+	OutLocalToWorld = LocalToWorldMatrix;
+	OutBindingParams.SplatScale = SplatScale;
+	OutBindingParams.AlphaCullThreshold = GaussianAlphaCullThreshold;
+	OutBindingParams.CutoffK = GaussianCutoffK;
+	OutBindingParams.CovarianceDilation = GaussianCovarianceDilation;
+	OutBindingParams.RenderShDegree = RenderShDegree;
+	OutBindingParams.ImportedShDegree = ImportedShDegree;
+	OutBindingParams.bHasShCoefficients = bHasShCoefficients;
+	OutBindingParams.TransparencyMultiplier = GaussianTransparencyMultiplier;
+	OutBindingParams.ClrOffset = GaussianClrOffset;
+	OutBindingParams.ClrScaleRGB = GaussianClrScaleRGB;
+	OutBindingParams.Saturation = GaussianSaturation;
+	OutBindingParams.LodLevel = 0.0;
+
+	if (bUseGlobalChunkLookup != 0u)
+	{
+		const uint BindingIndex = BindingIds[GaussianIndex];
+		OutLocalToWorld = LoadGaussianChunkMatrix(ChunkMatrixRows, BindingIndex);
+		OutBindingParams = LoadGaussianBindingRenderParams(ChunkBindingParams, BindingIndex);
+	}
+}
 
 bool BlendTileSplat(
 	float2 PixelCenter,
@@ -62,7 +96,12 @@ bool BlendTileSplat(
 	}
 
 	const FGaussianSplatGPU Splat = LoadGaussianSplat(GaussianSplatsVec4, GaussianIndex);
-	if (Splat.Opacity < GaussianAlphaCullThreshold)
+
+	float4x4 SplatLocalToWorld;
+	FGaussianBindingRenderParams BindingParams;
+	ResolveSplatBinding(GaussianIndex, SplatLocalToWorld, BindingParams);
+
+	if (Splat.Opacity < BindingParams.AlphaCullThreshold)
 	{
 		return false;
 	}
@@ -74,15 +113,15 @@ bool BlendTileSplat(
 	float EffectiveOpacity;
 	if (!ProjectSplatEllipse(
 		Splat,
-		LocalToWorldMatrix,
+		SplatLocalToWorld,
 		PreViewTranslation,
 		TranslatedViewMatrix,
 		TranslatedWorldToClip,
 		ViewportRect,
 		ViewRect,
-		SplatScale,
-		GaussianCutoffK,
-		GaussianCovarianceDilation,
+		BindingParams.SplatScale,
+		BindingParams.CutoffK,
+		BindingParams.CovarianceDilation,
 		GaussianMinSigmaPixels,
 		MaxRasterRadius,
 		ScreenCenter,
@@ -94,7 +133,7 @@ bool BlendTileSplat(
 		return false;
 	}
 
-	const float Alpha = EvaluateSplatAlphaEllipse(PixelCenter, ScreenCenter, InvConic, EffectiveOpacity, GaussianCutoffK, bDebugOverlay, GaussianTransparencyMultiplier);
+	const float Alpha = EvaluateSplatAlphaEllipse(PixelCenter, ScreenCenter, InvConic, EffectiveOpacity, BindingParams.CutoffK, bDebugOverlay, BindingParams.TransparencyMultiplier);
 	if (Alpha < GaussianAlphaCutoff)
 	{
 		return false;
@@ -105,23 +144,26 @@ bool BlendTileSplat(
 	{
 		const float3 WorldViewDir = ComputeGaussianWorldViewDir(
 			Splat.Position,
-			LocalToWorldMatrix,
+			SplatLocalToWorld,
 			CameraWorldPosition);
 		Color = EvaluateGaussianShRadiance(
 			GaussianShCoeffs,
 			GaussianIndex,
-			RenderShDegree,
-			ImportedShDegree,
-			bHasShCoefficients,
+			BindingParams.RenderShDegree,
+			BindingParams.ImportedShDegree,
+			BindingParams.bHasShCoefficients,
 			WorldViewDir,
 			Splat.Color.rgb,
-			GaussianClrOffset,
-			GaussianClrScaleRGB,
-			GaussianSaturation);
+			BindingParams.ClrOffset,
+			BindingParams.ClrScaleRGB,
+			BindingParams.Saturation);
 	}
 	else
 	{
-		Color = float3(1.0, 0.1, 0.8);
+		const uint LodLevel = (uint)max(0.0, round(BindingParams.LodLevel));
+		Color = (StreamingDebugRenderMode == 1u)
+			? GetGaussianLodDebugColor(LodLevel)
+			: float3(1.0, 0.1, 0.8);
 	}
 
 	AccumRgb += Color * Alpha * Transmittance;

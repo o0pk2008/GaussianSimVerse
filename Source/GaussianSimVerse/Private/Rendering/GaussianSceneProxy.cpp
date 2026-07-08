@@ -40,11 +40,26 @@ FGaussianSceneProxy::FGaussianSceneProxy(const UGaussianScene* InScene)
 		}
 
 		FGaussianChunkRenderData ChunkData;
-		ChunkData.GPUBuffer = Asset->GetGPUBuffer();
-		ChunkData.LocalToWorld = LocalToWorld;
-		ChunkData.Bounds = Chunk->LocalBounds;
+		ChunkData.GPUBufferShared = Asset->GetGPUBufferShared();
+
+		const bool bIsStreamedChunk = !Chunk->StreamingKey.KeyString.IsEmpty();
+		const FVector SceneOrigin = LocalToWorld.GetOrigin();
+		const FVector ChunkOffset = bIsStreamedChunk
+			? (FVector(Asset->Bounds.Origin) - SceneOrigin)
+			: FVector(Chunk->LocalBounds.Origin);
+		ChunkData.LocalToWorld = LocalToWorld * FTranslationMatrix(ChunkOffset);
+
+		FGaussianBounds ChunkLocalBounds;
+		ChunkLocalBounds.Origin = FVector3f::ZeroVector;
+		ChunkLocalBounds.Extent = Asset->Bounds.Extent;
+		ChunkData.Bounds = ChunkLocalBounds;
+		if (ChunkData.Bounds.Extent.IsNearlyZero())
+		{
+			ChunkData.Bounds.Extent = Chunk->LocalBounds.Extent;
+		}
 		ChunkData.GaussianCount = static_cast<uint32>(Asset->GaussianCount);
 		ChunkData.ChunkIndex = ChunkIndex++;
+		ChunkData.ChunkLodLevel = Chunk->ActiveLOD;
 		Chunks.Add(MoveTemp(ChunkData));
 	}
 }

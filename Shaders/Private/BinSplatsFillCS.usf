@@ -4,14 +4,23 @@
 #include "/Engine/Public/Platform.ush"
 #include "/Plugin/GaussianSimVerse/Private/GaussianCommon.ush"
 
+#pragma pack_matrix(row_major)
+
 float4x4 LocalToWorldMatrix;
 float3 PreViewTranslation;
 float4x4 TranslatedViewMatrix;
 float4x4 TranslatedWorldToClip;
 float4 ViewportRect;
 float4 ViewRect;
+float3 CameraViewDirection;
+float ViewDepthMin;
+float ViewDepthMax;
+uint bUseGlobalChunkLookup;
 StructuredBuffer<uint> SortedIndices;
 StructuredBuffer<uint> VisibleCountBuffer;
+StructuredBuffer<uint> BindingIds;
+StructuredBuffer<float4> ChunkMatrixRows;
+StructuredBuffer<float4> ChunkBindingParams;
 StructuredBuffer<float4> GaussianSplatsVec4;
 StructuredBuffer<uint> TileOffsets;
 RWStructuredBuffer<uint> RWTileFillCounters;
@@ -47,8 +56,24 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 		return;
 	}
 
+	float4x4 SplatLocalToWorld = LocalToWorldMatrix;
+	float LocalSplatScale = SplatScale;
+	float LocalAlphaCullThreshold = GaussianAlphaCullThreshold;
+	float LocalCutoffK = GaussianCutoffK;
+	float LocalCovarianceDilation = GaussianCovarianceDilation;
+	if (bUseGlobalChunkLookup != 0u)
+	{
+		const uint BindingIndex = BindingIds[GaussianIndex];
+		SplatLocalToWorld = LoadGaussianChunkMatrix(ChunkMatrixRows, BindingIndex);
+		const FGaussianBindingRenderParams BindingParams = LoadGaussianBindingRenderParams(ChunkBindingParams, BindingIndex);
+		LocalSplatScale = BindingParams.SplatScale;
+		LocalAlphaCullThreshold = BindingParams.AlphaCullThreshold;
+		LocalCutoffK = BindingParams.CutoffK;
+		LocalCovarianceDilation = BindingParams.CovarianceDilation;
+	}
+
 	const FGaussianSplatGPU Splat = LoadGaussianSplat(GaussianSplatsVec4, GaussianIndex);
-	if (Splat.Opacity < GaussianAlphaCullThreshold)
+	if (Splat.Opacity < LocalAlphaCullThreshold)
 	{
 		return;
 	}
@@ -60,15 +85,15 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 	float EffectiveOpacity;
 	if (!ProjectSplatEllipse(
 		Splat,
-		LocalToWorldMatrix,
+		SplatLocalToWorld,
 		PreViewTranslation,
 		TranslatedViewMatrix,
 		TranslatedWorldToClip,
 		ViewportRect,
 		ViewRect,
-		SplatScale,
-		GaussianCutoffK,
-		GaussianCovarianceDilation,
+		LocalSplatScale,
+		LocalCutoffK,
+		LocalCovarianceDilation,
 		GaussianMinSigmaPixels,
 		MaxRasterRadius,
 		ScreenCenter,
@@ -86,8 +111,14 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 	}
 
 	const float2 BinExtent = GetSplatTileBinningExtent(Extent);
-	const float4 ClipPosition = LocalToClipPosition(Splat.Position, LocalToWorldMatrix, PreViewTranslation, TranslatedWorldToClip);
-	const uint SortKey = EncodeGaussianNearToFarKey(ClipPosition);
+	float4x4 SortKeyMatrix = SplatLocalToWorld;
+	float4 ClipPosition = LocalToClipPosition(Splat.Position, SortKeyMatrix, PreViewTranslation, TranslatedWorldToClip);
+	uint SortKey = EncodeGaussianNearToFarKey(ClipPosition);
+	if (bUseGlobalChunkLookup != 0u)
+	{
+		const float3 WorldPosition = mul(float4(Splat.Position, 1.0), SplatLocalToWorld).xyz;
+		SortKey = EncodeGaussianViewNearToFarKey(WorldPosition, CameraViewDirection, ViewDepthMin, ViewDepthMax);
+	}
 
 	// Always use the full overlapping tile range (same as BinSplatsCountCS).
 	// The old 3x3 home-tile shortcut missed tiles when a medium splat sat near a tile

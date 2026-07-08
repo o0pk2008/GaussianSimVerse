@@ -5,6 +5,8 @@
 #include "GaussianAsset.h"
 #include "GaussianAssetTypeActions.h"
 #include "GaussianSceneActorFactory.h"
+#include "GaussianStreamedSceneActorFactory.h"
+#include "GaussianStreamedSceneAssetTypeActions.h"
 #include "Import/GaussianPlyReader.h"
 #include "Import/GaussianSplatReader.h"
 #include "Import/GaussianSogReader.h"
@@ -20,7 +22,9 @@
 #define LOCTEXT_NAMESPACE "FGaussianSimVerseEditorModule"
 
 static TSharedPtr<FAssetTypeActions_GaussianAsset> GaussianAssetTypeActions;
+static TSharedPtr<FAssetTypeActions_GaussianStreamedSceneAsset> GaussianStreamedSceneAssetTypeActions;
 static TObjectPtr<UActorFactory> GaussianSceneActorFactoryInstance = nullptr;
+static TObjectPtr<UActorFactory> GaussianStreamedSceneActorFactoryInstance = nullptr;
 
 namespace
 {
@@ -67,8 +71,10 @@ namespace
 void FGaussianSimVerseEditorModule::StartupModule()
 {
 	GaussianAssetTypeActions = MakeShared<FAssetTypeActions_GaussianAsset>();
+	GaussianStreamedSceneAssetTypeActions = MakeShared<FAssetTypeActions_GaussianStreamedSceneAsset>();
 	IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools")).Get();
 	AssetTools.RegisterAssetTypeActions(GaussianAssetTypeActions.ToSharedRef());
+	AssetTools.RegisterAssetTypeActions(GaussianStreamedSceneAssetTypeActions.ToSharedRef());
 
 	if (GEditor)
 	{
@@ -86,6 +92,20 @@ void FGaussianSimVerseEditorModule::StartupModule()
 			}
 		}
 
+		const bool bStreamedFactoryRegistered = GEditor->ActorFactories.ContainsByPredicate([](const UActorFactory* Factory)
+		{
+			return Factory && Factory->GetClass() == UGaussianStreamedSceneActorFactory::StaticClass();
+		});
+
+		if (!bStreamedFactoryRegistered)
+		{
+			GaussianStreamedSceneActorFactoryInstance = NewObject<UGaussianStreamedSceneActorFactory>(GetTransientPackage());
+			if (GaussianStreamedSceneActorFactoryInstance)
+			{
+				GEditor->ActorFactories.Add(GaussianStreamedSceneActorFactoryInstance);
+			}
+		}
+
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("GaussianSimVerseEditor module started"));
@@ -99,11 +119,25 @@ void FGaussianSimVerseEditorModule::ShutdownModule()
 		GaussianSceneActorFactoryInstance = nullptr;
 	}
 
-	if (FModuleManager::Get().IsModuleLoaded(TEXT("AssetTools")) && GaussianAssetTypeActions.IsValid())
+	if (GEditor && GaussianStreamedSceneActorFactoryInstance)
+	{
+		GEditor->ActorFactories.RemoveSingleSwap(GaussianStreamedSceneActorFactoryInstance);
+		GaussianStreamedSceneActorFactoryInstance = nullptr;
+	}
+
+	if (FModuleManager::Get().IsModuleLoaded(TEXT("AssetTools")))
 	{
 		IAssetTools& AssetTools = FModuleManager::GetModuleChecked<FAssetToolsModule>(TEXT("AssetTools")).Get();
-		AssetTools.UnregisterAssetTypeActions(GaussianAssetTypeActions.ToSharedRef());
-		GaussianAssetTypeActions.Reset();
+		if (GaussianAssetTypeActions.IsValid())
+		{
+			AssetTools.UnregisterAssetTypeActions(GaussianAssetTypeActions.ToSharedRef());
+			GaussianAssetTypeActions.Reset();
+		}
+		if (GaussianStreamedSceneAssetTypeActions.IsValid())
+		{
+			AssetTools.UnregisterAssetTypeActions(GaussianStreamedSceneAssetTypeActions.ToSharedRef());
+			GaussianStreamedSceneAssetTypeActions.Reset();
+		}
 	}
 }
 

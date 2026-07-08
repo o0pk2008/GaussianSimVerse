@@ -9,6 +9,7 @@
 
 void FGaussianGPUBuffer::SetCPUData(TArray<FGaussianSplatGPU>&& InSplatData)
 {
+	FScopeLock Lock(&DataLock);
 	SplatCPUData = MoveTemp(InSplatData);
 	GaussianGPU::BuildPositionBuffer(SplatCPUData, PositionCPUData);
 	NumGaussians = SplatCPUData.Num();
@@ -45,6 +46,7 @@ void FGaussianGPUBuffer::MarkDirty()
 
 void FGaussianGPUBuffer::ReleaseRenderResources()
 {
+	FScopeLock Lock(&DataLock);
 	ReleasePooledBuffers();
 }
 
@@ -100,43 +102,68 @@ void FGaussianGPUBuffer::EnsurePooledBuffers(uint32 InNumGaussians)
 
 void FGaussianGPUBuffer::UploadToPooledBuffers(FRDGBuilder& GraphBuilder)
 {
-	if (!bDirty || NumGaussians == 0 || !SplatPooledBuffer.IsValid() || !PositionPooledBuffer.IsValid())
+	TArray<FGaussianSplatGPU> UploadSplatData;
+	TArray<FVector4f> UploadPositionData;
+	TArray<float> UploadShData;
+	uint32 UploadNumGaussians = 0;
+	TRefCountPtr<FRDGPooledBuffer> LocalSplatBuffer;
+	TRefCountPtr<FRDGPooledBuffer> LocalPositionBuffer;
+	TRefCountPtr<FRDGPooledBuffer> LocalShBuffer;
+
 	{
-		return;
+		FScopeLock Lock(&DataLock);
+		if (!bDirty || NumGaussians == 0 || !SplatPooledBuffer.IsValid() || !PositionPooledBuffer.IsValid())
+		{
+			return;
+		}
+
+		UploadSplatData = SplatCPUData;
+		UploadPositionData = PositionCPUData;
+		UploadShData = ShCoefficientCPUData;
+		UploadNumGaussians = NumGaussians;
+		LocalSplatBuffer = SplatPooledBuffer;
+		LocalPositionBuffer = PositionPooledBuffer;
+		if (ShCoefficientPooledBuffer.IsValid()
+			&& UploadShData.Num() == static_cast<int32>(UploadNumGaussians * GaussianShCoefficientsPerSplat))
+		{
+			LocalShBuffer = ShCoefficientPooledBuffer;
+		}
 	}
 
 	FRDGBufferRef SplatUploadBuffer = CreateStructuredUploadBuffer(
 		GraphBuilder,
 		TEXT("Gaussian.SplatUpload"),
-		SplatCPUData);
+		UploadSplatData);
 
 	FRDGBufferRef PositionUploadBuffer = CreateStructuredUploadBuffer(
 		GraphBuilder,
 		TEXT("Gaussian.PositionUpload"),
-		PositionCPUData);
+		UploadPositionData);
 
-	FRDGBufferRef SplatDestBuffer = GraphBuilder.RegisterExternalBuffer(SplatPooledBuffer);
-	FRDGBufferRef PositionDestBuffer = GraphBuilder.RegisterExternalBuffer(PositionPooledBuffer);
+	FRDGBufferRef SplatDestBuffer = GraphBuilder.RegisterExternalBuffer(LocalSplatBuffer);
+	FRDGBufferRef PositionDestBuffer = GraphBuilder.RegisterExternalBuffer(LocalPositionBuffer);
 
 	AddCopyBufferPass(GraphBuilder, SplatDestBuffer, SplatUploadBuffer);
 	AddCopyBufferPass(GraphBuilder, PositionDestBuffer, PositionUploadBuffer);
 
-	if (ShCoefficientPooledBuffer.IsValid()
-		&& ShCoefficientCPUData.Num() == static_cast<int32>(NumGaussians * GaussianShCoefficientsPerSplat))
+	if (LocalShBuffer.IsValid())
 	{
 		FRDGBufferRef ShUploadBuffer = CreateStructuredUploadBuffer(
 			GraphBuilder,
 			TEXT("Gaussian.ShCoefficientUpload"),
-			ShCoefficientCPUData);
-		FRDGBufferRef ShDestBuffer = GraphBuilder.RegisterExternalBuffer(ShCoefficientPooledBuffer);
+			UploadShData);
+		FRDGBufferRef ShDestBuffer = GraphBuilder.RegisterExternalBuffer(LocalShBuffer);
 		AddCopyBufferPass(GraphBuilder, ShDestBuffer, ShUploadBuffer);
 	}
 
-	bDirty = false;
+	{
+		FScopeLock Lock(&DataLock);
+		bDirty = false;
+	}
 
 	if (GaussianSimVerse::RenderSettings::IsGPUBufferDebugEnabled())
 	{
-		UE_LOG(LogGaussianSimVerse, Log, TEXT("Uploaded %u Gaussians to GPU buffer"), NumGaussians);
+		UE_LOG(LogGaussianSimVerse, Log, TEXT("Uploaded %u Gaussians to GPU buffer"), UploadNumGaussians);
 	}
 }
 
@@ -157,9 +184,12 @@ void FGaussianGPUBuffer::CommitToGPU(FRDGBuilder& GraphBuilder, FGaussianRDGBuff
 		return;
 	}
 
-	if (!SplatPooledBuffer.IsValid() || !PositionPooledBuffer.IsValid())
 	{
-		EnsurePooledBuffers(NumGaussians);
+		FScopeLock Lock(&DataLock);
+		if (!SplatPooledBuffer.IsValid() || !PositionPooledBuffer.IsValid())
+		{
+			EnsurePooledBuffers(NumGaussians);
+		}
 	}
 
 	UploadToPooledBuffers(GraphBuilder);

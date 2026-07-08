@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "GaussianTypes.h"
+#include "Templates/SharedPointer.h"
 
 class UGaussianScene;
 class FGaussianGPUBuffer;
@@ -11,11 +12,14 @@ class FGaussianGPUBuffer;
 /** Render-thread chunk binding with GPU buffer reference. */
 struct GAUSSIANSIMVERSE_API FGaussianChunkRenderData
 {
-	FGaussianGPUBuffer* GPUBuffer = nullptr;
+	TSharedPtr<FGaussianGPUBuffer, ESPMode::ThreadSafe> GPUBufferShared;
 	FMatrix LocalToWorld = FMatrix::Identity;
 	FGaussianBounds Bounds;
 	uint32 GaussianCount = 0;
 	uint32 ChunkIndex = INDEX_NONE;
+	int32 ChunkLodLevel = 0;
+
+	FGaussianGPUBuffer* GetGPUBuffer() const { return GPUBufferShared.Get(); }
 };
 
 /** Render-thread mirror of a registered Gaussian scene. */

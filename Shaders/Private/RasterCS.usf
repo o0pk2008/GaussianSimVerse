@@ -30,6 +30,7 @@ float3 GaussianClrOffset;
 float3 GaussianClrScaleRGB;
 float GaussianSaturation;
 float GaussianTransparencyMultiplier;
+uint StreamingDebugRenderMode;
 
 StructuredBuffer<uint> SortedIndices;
 StructuredBuffer<uint> VisibleCountBuffer;
@@ -140,6 +141,10 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 			else
 			{
 				Alpha = EvaluateSplatAlphaEllipse(float2(X, Y) + 0.5, ScreenCenter, InvConic, EffectiveOpacity, GaussianCutoffK, bDebugOverlay, GaussianTransparencyMultiplier);
+				if (StreamingDebugRenderMode == 1u)
+				{
+					Color = GetGaussianLodDebugColor(0u);
+				}
 				if (Alpha < GaussianAlphaCutoff)
 				{
 					continue;

@@ -22,6 +22,7 @@ namespace GaussianSimVerse::RenderSettings
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarMaxScenesPerView;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarMaxRasterSplats;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarDebugRender;
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarRenderDebug;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarDebugOverlay;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarUseTileRaster;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<float> CVarAdaptiveFarViewRatio;
@@ -34,6 +35,18 @@ namespace GaussianSimVerse::RenderSettings
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<float> CVarMinSigmaPixels;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarUseResolvedSceneColor;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarPostProcessPass;
+
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarStreamingEnable;
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<float> CVarStreamingLoadRadius;
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<float> CVarStreamingLodBaseDistance;
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<float> CVarStreamingLodMultiplier;
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarStreamingMaxLoadedSplats;
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarStreamingMaxLoadsPerFrame;
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarStreamingDebugDraw;
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarStreamingDebugOverlay;
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarStreamingDebugRenderMode;
+
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarGlobalUnifiedSort;
 
 	FORCEINLINE bool IsRenderingEnabled()
 	{
@@ -78,7 +91,8 @@ namespace GaussianSimVerse::RenderSettings
 
 	FORCEINLINE bool IsRenderDebugEnabled()
 	{
-		return CVarDebugRender.GetValueOnAnyThread() != 0;
+		return CVarDebugRender.GetValueOnAnyThread() != 0
+			|| CVarRenderDebug.GetValueOnAnyThread() != 0;
 	}
 
 	FORCEINLINE bool IsDebugOverlayEnabled()
@@ -227,5 +241,55 @@ namespace GaussianSimVerse::RenderSettings
 	FORCEINLINE bool UseResolvedSceneColorPath()
 	{
 		return CVarUseResolvedSceneColor.GetValueOnAnyThread() != 0;
+	}
+
+	FORCEINLINE bool IsStreamingEnabled()
+	{
+		return CVarStreamingEnable.GetValueOnAnyThread() != 0;
+	}
+
+	FORCEINLINE float GetStreamingLoadRadius()
+	{
+		return FMath::Max(100.0f, CVarStreamingLoadRadius.GetValueOnAnyThread());
+	}
+
+	FORCEINLINE float GetStreamingLodBaseDistance()
+	{
+		return FMath::Max(0.01f, CVarStreamingLodBaseDistance.GetValueOnAnyThread());
+	}
+
+	FORCEINLINE float GetStreamingLodMultiplier()
+	{
+		return FMath::Max(0.01f, CVarStreamingLodMultiplier.GetValueOnAnyThread());
+	}
+
+	FORCEINLINE int32 GetStreamingMaxLoadedSplats()
+	{
+		return FMath::Max(0, CVarStreamingMaxLoadedSplats.GetValueOnAnyThread());
+	}
+
+	FORCEINLINE int32 GetStreamingMaxLoadsPerFrame()
+	{
+		return FMath::Clamp(CVarStreamingMaxLoadsPerFrame.GetValueOnAnyThread(), 1, 16);
+	}
+
+	FORCEINLINE bool IsStreamingDebugEnabled()
+	{
+		return CVarStreamingDebugDraw.GetValueOnAnyThread() != 0;
+	}
+
+	FORCEINLINE bool IsStreamingDebugOverlayEnabled()
+	{
+		return CVarStreamingDebugOverlay.GetValueOnAnyThread() != 0;
+	}
+
+	FORCEINLINE int32 GetStreamingDebugRenderMode()
+	{
+		return FMath::Clamp(CVarStreamingDebugRenderMode.GetValueOnAnyThread(), 0, 1);
+	}
+
+	FORCEINLINE bool IsGlobalUnifiedSortEnabled()
+	{
+		return CVarGlobalUnifiedSort.GetValueOnAnyThread() != 0;
 	}
 }

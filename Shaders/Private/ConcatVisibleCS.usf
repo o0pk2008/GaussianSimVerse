@@ -1,0 +1,56 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+// Concatenate visible splats from one chunk into a unified global buffer.
+
+#include "/Engine/Public/Platform.ush"
+#include "/Plugin/GaussianSimVerse/Private/GaussianCommon.ush"
+
+uint ChunkIndex;
+uint MaxVisibleCount;
+uint BindingIndex;
+StructuredBuffer<uint> ChunkWriteBases;
+uint bCopyShCoefficients;
+StructuredBuffer<uint> VisibleIndices;
+StructuredBuffer<uint> VisibleCountBuffer;
+StructuredBuffer<float4> GaussianSplatsVec4;
+StructuredBuffer<float> GaussianShCoeffs;
+RWStructuredBuffer<float4> RWUnifiedSplatsVec4;
+RWStructuredBuffer<uint> RWBindingIds;
+RWStructuredBuffer<float> RWUnifiedShCoeffs;
+
+void StoreGaussianSplat(RWStructuredBuffer<float4> DstSplatsVec4, uint Index, FGaussianSplatGPU Splat)
+{
+	const uint Base = Index * GaussianSplatFloat4Stride;
+	DstSplatsVec4[Base + 0u] = float4(Splat.Position, Splat.Opacity);
+	DstSplatsVec4[Base + 1u] = Splat.Rotation;
+	DstSplatsVec4[Base + 2u] = float4(Splat.Scale, Splat.Padding);
+	DstSplatsVec4[Base + 3u] = Splat.Color;
+}
+
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	const uint ElementIndex = DispatchThreadId.x;
+	const uint VisibleCount = min(VisibleCountBuffer[0], MaxVisibleCount);
+	if (ElementIndex >= VisibleCount)
+	{
+		return;
+	}
+
+	const uint GaussianIndex = VisibleIndices[ElementIndex];
+	const uint GlobalIndex = ChunkWriteBases[ChunkIndex] + ElementIndex;
+	const FGaussianSplatGPU Splat = LoadGaussianSplat(GaussianSplatsVec4, GaussianIndex);
+	StoreGaussianSplat(RWUnifiedSplatsVec4, GlobalIndex, Splat);
+	RWBindingIds[GlobalIndex] = BindingIndex;
+
+	if (bCopyShCoefficients != 0u)
+	{
+		const uint ShStride = 48u;
+		const uint DstBase = GlobalIndex * ShStride;
+		const uint SrcBase = GaussianIndex * ShStride;
+		[unroll]
+		for (uint CoeffIndex = 0u; CoeffIndex < ShStride; ++CoeffIndex)
+		{
+			RWUnifiedShCoeffs[DstBase + CoeffIndex] = GaussianShCoeffs[SrcBase + CoeffIndex];
+		}
+	}
+}

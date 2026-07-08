@@ -272,6 +272,19 @@ float ApplyGaussianTransparency(float Opacity, float TransparencyMultiplier)
 	return saturate(Opacity * TransparencyMultiplier);
 }
 
+float3 GetGaussianLodDebugColor(uint LodLevel)
+{
+	const uint Palette = LodLevel % 8u;
+	if (Palette == 0u) return float3(1.0, 0.2, 0.2);
+	if (Palette == 1u) return float3(0.2, 1.0, 0.2);
+	if (Palette == 2u) return float3(0.2, 0.5, 1.0);
+	if (Palette == 3u) return float3(1.0, 0.9, 0.2);
+	if (Palette == 4u) return float3(1.0, 0.2, 1.0);
+	if (Palette == 5u) return float3(0.2, 1.0, 1.0);
+	if (Palette == 6u) return float3(1.0, 0.6, 0.2);
+	return float3(0.7, 0.5, 1.0);
+}
+
 float3 EvaluateGaussianShRadiance(
 	StructuredBuffer<float> GaussianShCoeffs,
 	uint GaussianIndex,
@@ -399,6 +412,56 @@ float4 LocalToClipPosition(float3 LocalPosition, float4x4 LocalToWorldMatrix, fl
 	return mul(float4(TranslatedWorldPosition, 1.0), TranslatedWorldToClip);
 }
 
+float4x4 LoadGaussianChunkMatrix(StructuredBuffer<float4> ChunkMatrixRows, uint BindingIndex)
+{
+	const uint Base = BindingIndex * 4u;
+	return float4x4(
+		ChunkMatrixRows[Base + 0u],
+		ChunkMatrixRows[Base + 1u],
+		ChunkMatrixRows[Base + 2u],
+		ChunkMatrixRows[Base + 3u]);
+}
+
+struct FGaussianBindingRenderParams
+{
+	float SplatScale;
+	float AlphaCullThreshold;
+	float CutoffK;
+	float CovarianceDilation;
+	uint RenderShDegree;
+	uint ImportedShDegree;
+	uint bHasShCoefficients;
+	float TransparencyMultiplier;
+	float3 ClrOffset;
+	float LodLevel;
+	float3 ClrScaleRGB;
+	float Saturation;
+};
+
+FGaussianBindingRenderParams LoadGaussianBindingRenderParams(StructuredBuffer<float4> ChunkBindingParams, uint BindingIndex)
+{
+	const uint Base = BindingIndex * 4u;
+	const float4 Row0 = ChunkBindingParams[Base + 0u];
+	const float4 Row1 = ChunkBindingParams[Base + 1u];
+	const float4 Row2 = ChunkBindingParams[Base + 2u];
+	const float4 Row3 = ChunkBindingParams[Base + 3u];
+
+	FGaussianBindingRenderParams Params;
+	Params.SplatScale = Row0.x;
+	Params.AlphaCullThreshold = Row0.y;
+	Params.CutoffK = Row0.z;
+	Params.CovarianceDilation = Row0.w;
+	Params.RenderShDegree = (uint)Row1.x;
+	Params.ImportedShDegree = (uint)Row1.y;
+	Params.bHasShCoefficients = (uint)Row1.z;
+	Params.TransparencyMultiplier = Row1.w;
+	Params.ClrOffset = Row2.xyz;
+	Params.LodLevel = Row2.w;
+	Params.ClrScaleRGB = Row3.xyz;
+	Params.Saturation = Row3.w;
+	return Params;
+}
+
 float2 ClipToViewport(float4 ClipPosition, float4 ViewportRect)
 {
 	const float InvW = rcp(ClipPosition.w);
@@ -432,10 +495,35 @@ float ComputeGaussianDepth01(float4 ClipPosition)
 	return 1.0 - NdcDepth;
 }
 
+/** PlayCanvas-style depth: dot(worldPosition, viewDirection) on scene bounds. */
+float ComputeGaussianViewDepth(float3 WorldPosition, float3 CameraViewDirection)
+{
+	return dot(WorldPosition, normalize(CameraViewDirection));
+}
+
+float ComputeGaussianViewDepth01(float ViewDepth, float ViewDepthMin, float ViewDepthMax)
+{
+	return saturate((ViewDepth - ViewDepthMin) / max(ViewDepthMax - ViewDepthMin, 1e-6));
+}
+
 /** Quantize depth before float->uint to reduce temporal flicker when the camera moves slightly. */
 float QuantizeGaussianDepth01(float Depth01)
 {
 	return floor(Depth01 * 16383.0) / 16383.0;
+}
+
+uint EncodeGaussianViewFarToNearKey(float3 WorldPosition, float3 CameraViewDirection, float ViewDepthMin, float ViewDepthMax)
+{
+	const float ViewDepth = ComputeGaussianViewDepth(WorldPosition, CameraViewDirection);
+	const float Depth01 = QuantizeGaussianDepth01(ComputeGaussianViewDepth01(ViewDepth, ViewDepthMin, ViewDepthMax));
+	return asuint(1.0 - Depth01);
+}
+
+uint EncodeGaussianViewNearToFarKey(float3 WorldPosition, float3 CameraViewDirection, float ViewDepthMin, float ViewDepthMax)
+{
+	const float ViewDepth = ComputeGaussianViewDepth(WorldPosition, CameraViewDirection);
+	const float Depth01 = QuantizeGaussianDepth01(ComputeGaussianViewDepth01(ViewDepth, ViewDepthMin, ViewDepthMax));
+	return asuint(Depth01);
 }
 
 uint EncodeGaussianNearToFarKey(float4 ClipPosition)

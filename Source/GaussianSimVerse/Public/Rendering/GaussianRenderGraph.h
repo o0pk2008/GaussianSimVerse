@@ -19,6 +19,19 @@ struct FGaussianRDGTransientResources
 	TArray<FGaussianRDGSortResult> SortResults;
 	uint32 UploadedGaussianCount = 0;
 	uint32 TotalCulledVisibleCount = 0;
+
+	float ViewDepthMin = 0.0f;
+	float ViewDepthMax = 100000.0f;
+	bool bUseGlobalUnifiedSort = false;
+	uint32 GlobalUnifiedCount = 0;
+	FRDGBufferSRVRef GlobalUnifiedSplatsSRV = nullptr;
+	FRDGBufferSRVRef GlobalUnifiedShCoeffsSRV = nullptr;
+	FRDGBufferSRVRef GlobalBindingIdsSRV = nullptr;
+	FRDGBufferSRVRef GlobalChunkMatrixRowsSRV = nullptr;
+	FRDGBufferSRVRef GlobalChunkBindingParamsSRV = nullptr;
+	FRDGBufferSRVRef GlobalSortedIndicesSRV = nullptr;
+	FRDGBufferSRVRef GlobalVisibleCountSRV = nullptr;
+	FGaussianRDGBufferBinding GlobalDrawBinding;
 };
 
 class GAUSSIANSIMVERSE_API FGaussianRenderGraph

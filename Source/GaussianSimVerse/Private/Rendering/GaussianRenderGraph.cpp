@@ -2,6 +2,7 @@
 
 #include "Rendering/GaussianRenderGraph.h"
 #include "Rendering/GaussianShaderTypes.h"
+#include "Rendering/GaussianGPUResources.h"
 #include "Rendering/GaussianRenderSettings.h"
 #include "Rendering/GaussianGPUResources.h"
 #include "GaussianSimVerse.h"
@@ -51,6 +52,7 @@ namespace GaussianRenderGraphPrivate
 		float GaussianMinSigmaPixels,
 		uint32 MaxRasterRadius,
 		bool bDebugOverlay,
+		uint32 StreamingDebugRenderMode,
 		uint32 RenderShDegree,
 		uint32 ImportedShDegree,
 		uint32 bHasShCoefficients,
@@ -59,7 +61,11 @@ namespace GaussianRenderGraphPrivate
 		FRDGBufferSRVRef SortedIndicesSRV,
 		FRDGBufferSRVRef VisibleCountSRV,
 		FRDGBufferSRVRef GaussianSplatsSRV,
-		FRDGBufferSRVRef GaussianShCoeffsSRV)
+		FRDGBufferSRVRef GaussianShCoeffsSRV,
+		FRDGBufferSRVRef BindingIdsSRV,
+		FRDGBufferSRVRef ChunkMatrixRowsSRV,
+		FRDGBufferSRVRef ChunkBindingParamsSRV,
+		uint32 bUseGlobalChunkLookup = 0u)
 	{
 		OutParameters.LocalToWorldMatrix = LocalToWorldMatrix;
 		OutParameters.PreViewTranslation = PreViewTranslation;
@@ -79,6 +85,7 @@ namespace GaussianRenderGraphPrivate
 		OutParameters.GaussianMinSigmaPixels = GaussianMinSigmaPixels;
 		OutParameters.MaxRasterRadius = MaxRasterRadius;
 		OutParameters.bDebugOverlay = bDebugOverlay ? 1u : 0u;
+		OutParameters.StreamingDebugRenderMode = StreamingDebugRenderMode;
 		OutParameters.RenderShDegree = RenderShDegree;
 		OutParameters.ImportedShDegree = ImportedShDegree;
 		OutParameters.bHasShCoefficients = bHasShCoefficients;
@@ -93,6 +100,522 @@ namespace GaussianRenderGraphPrivate
 		OutParameters.VisibleCountBuffer = VisibleCountSRV;
 		OutParameters.GaussianSplatsVec4 = GaussianSplatsSRV;
 		OutParameters.GaussianShCoeffs = GaussianShCoeffsSRV;
+		OutParameters.bUseGlobalChunkLookup = bUseGlobalChunkLookup;
+		OutParameters.BindingIds = BindingIdsSRV;
+		OutParameters.ChunkMatrixRows = ChunkMatrixRowsSRV;
+		OutParameters.ChunkBindingParams = ChunkBindingParamsSRV;
+	}
+
+	static FRDGBufferSRVRef CreateChunkBindingParamsSRV(
+		FRDGBuilder& GraphBuilder,
+		const TArray<FGaussianRDGBufferBinding>& GPUBuffers,
+		const TCHAR* DebugName)
+	{
+		TArray<FVector4f> Rows;
+		Rows.Reserve(GPUBuffers.Num() * 4);
+		for (const FGaussianRDGBufferBinding& Binding : GPUBuffers)
+		{
+			Rows.Add(FVector4f(
+				Binding.SplatScale,
+				Binding.AlphaCullThreshold,
+				Binding.CutoffK,
+				Binding.CovarianceDilation));
+			Rows.Add(FVector4f(
+				static_cast<float>(Binding.RenderShDegree),
+				static_cast<float>(Binding.ImportedShDegree),
+				static_cast<float>(Binding.bHasShCoefficients),
+				Binding.ColorGrade.TransparencyMultiplier));
+			Rows.Add(FVector4f(Binding.ColorGrade.ClrOffset, static_cast<float>(Binding.LodLevel)));
+			Rows.Add(FVector4f(Binding.ColorGrade.ClrScaleRGB, Binding.ColorGrade.Saturation));
+		}
+
+		if (Rows.Num() == 0)
+		{
+			Rows.SetNum(4);
+		}
+
+		FRDGBufferRef Buffer = CreateStructuredUploadBuffer(
+			GraphBuilder,
+			DebugName,
+			Rows);
+		return GraphBuilder.CreateSRV(Buffer);
+	}
+
+	static void RunGaussianRadixSort(
+		FRDGBuilder& GraphBuilder,
+		const FGlobalShaderMap* GlobalShaderMap,
+		FRDGBufferRef SortKeysA,
+		FRDGBufferRef SortKeysB,
+		uint32 ElementCount,
+		const TCHAR* Label)
+	{
+		const TShaderMapRef<FGaussianRadixCountCS> RadixCountShader(GlobalShaderMap);
+		const TShaderMapRef<FGaussianRadixPrefixSumCS> RadixPrefixShader(GlobalShaderMap);
+		const TShaderMapRef<FGaussianRadixScatterCS> RadixScatterShader(GlobalShaderMap);
+		if (!RadixCountShader.IsValid() || !RadixPrefixShader.IsValid() || !RadixScatterShader.IsValid())
+		{
+			return;
+		}
+
+		FRDGBufferRef HistogramBuffer = GraphBuilder.CreateBuffer(
+			FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), 16),
+			*FString::Printf(TEXT("Gaussian.RadixHist.%s"), Label));
+		FRDGBufferRef ScatterBaseBuffer = GraphBuilder.CreateBuffer(
+			FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), 16),
+			*FString::Printf(TEXT("Gaussian.RadixBase.%s"), Label));
+
+		FRDGBufferRef InputKeys = SortKeysA;
+		FRDGBufferRef OutputKeys = SortKeysB;
+		for (uint32 Digit = 0; Digit < 16u; ++Digit)
+		{
+			const uint32 DigitShift = Digit * 4u;
+			AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(HistogramBuffer), 0u);
+
+			{
+				FGaussianRadixCountCS::FParameters* CountParams = GraphBuilder.AllocParameters<FGaussianRadixCountCS::FParameters>();
+				CountParams->ElementCount = ElementCount;
+				CountParams->DigitShift = DigitShift;
+				CountParams->SortKeys = GraphBuilder.CreateSRV(InputKeys);
+				CountParams->RWHistogram = GraphBuilder.CreateUAV(HistogramBuffer);
+				const uint32 NumGroups = FMath::DivideAndRoundUp(ElementCount, GaussianThreadGroupSize);
+				FComputeShaderUtils::AddPass(
+					GraphBuilder,
+					RDG_EVENT_NAME("GaussianSimVerse::RadixCount %s d%u", Label, Digit),
+					ERDGPassFlags::Compute,
+					RadixCountShader,
+					CountParams,
+					FIntVector(NumGroups, 1, 1));
+			}
+
+			{
+				FGaussianRadixPrefixSumCS::FParameters* PrefixParams = GraphBuilder.AllocParameters<FGaussianRadixPrefixSumCS::FParameters>();
+				PrefixParams->Histogram = GraphBuilder.CreateSRV(HistogramBuffer);
+				PrefixParams->RWScatterBase = GraphBuilder.CreateUAV(ScatterBaseBuffer);
+				FComputeShaderUtils::AddPass(
+					GraphBuilder,
+					RDG_EVENT_NAME("GaussianSimVerse::RadixPrefix %s d%u", Label, Digit),
+					ERDGPassFlags::Compute,
+					RadixPrefixShader,
+					PrefixParams,
+					FIntVector(1, 1, 1));
+			}
+
+			{
+				FGaussianRadixScatterCS::FParameters* ScatterParams = GraphBuilder.AllocParameters<FGaussianRadixScatterCS::FParameters>();
+				ScatterParams->ElementCount = ElementCount;
+				ScatterParams->DigitShift = DigitShift;
+				ScatterParams->SortKeysIn = GraphBuilder.CreateSRV(InputKeys);
+				ScatterParams->RWScatterBase = GraphBuilder.CreateUAV(ScatterBaseBuffer);
+				ScatterParams->RWSortKeysOut = GraphBuilder.CreateUAV(OutputKeys);
+				const uint32 NumGroups = FMath::DivideAndRoundUp(ElementCount, GaussianThreadGroupSize);
+				FComputeShaderUtils::AddPass(
+					GraphBuilder,
+					RDG_EVENT_NAME("GaussianSimVerse::RadixScatter %s d%u", Label, Digit),
+					ERDGPassFlags::Compute,
+					RadixScatterShader,
+					ScatterParams,
+					FIntVector(NumGroups, 1, 1));
+			}
+
+			Swap(InputKeys, OutputKeys);
+		}
+	}
+
+	static uint32 GetPaddedSortCount(uint32 VisibleCount)
+	{
+		const int32 MaxSort = FMath::Max(2, GaussianSimVerse::RenderSettings::CVarMaxSortElements.GetValueOnRenderThread());
+		const uint32 ClampedCount = FMath::Min(VisibleCount, static_cast<uint32>(MaxSort));
+		return FMath::RoundUpToPowerOfTwo(ClampedCount);
+	}
+
+	static float GetChunkDepthSquared(
+		const FGaussianRDGBufferBinding& Binding,
+		const FVector& ViewOrigin)
+	{
+		const FVector ChunkCenterWorld = Binding.LocalToWorld.GetOrigin();
+		return FVector::DistSquared(ViewOrigin, ChunkCenterWorld);
+	}
+
+	static bool TryGetBindingWorldBounds(
+		const FGaussianRenderGraph::FPassInputs& Inputs,
+		const FGaussianRDGBufferBinding& Binding,
+		FBox& OutWorldBox)
+	{
+		for (const FGaussianSceneProxy& SceneProxy : Inputs.FrameResources.SceneProxies)
+		{
+			if (SceneProxy.SceneId != Binding.SceneId)
+			{
+				continue;
+			}
+
+			for (const FGaussianChunkRenderData& Chunk : SceneProxy.Chunks)
+			{
+				if (Chunk.ChunkIndex == Binding.ChunkIndex)
+				{
+					OutWorldBox = FBox(Chunk.Bounds.GetBox()).TransformBy(Binding.LocalToWorld);
+					return true;
+				}
+			}
+
+			OutWorldBox = FBox(SceneProxy.Bounds.GetBox()).TransformBy(SceneProxy.LocalToWorld);
+			return true;
+		}
+
+		const FVector Origin = Binding.LocalToWorld.GetOrigin();
+		OutWorldBox = FBox(Origin - FVector(1000.0), Origin + FVector(1000.0));
+		return false;
+	}
+
+	static void ComputeViewDepthRange(
+		const FGaussianRenderGraph::FPassInputs& Inputs,
+		const FGaussianRDGTransientResources& TransientResources,
+		float& OutMinDepth,
+		float& OutMaxDepth)
+	{
+		const FVector ViewDir = Inputs.ViewData.ViewDirection.GetSafeNormal();
+		float MinDepth = TNumericLimits<float>::Max();
+		float MaxDepth = -TNumericLimits<float>::Max();
+
+		for (const FGaussianRDGCullResult& CullResult : TransientResources.CullResults)
+		{
+			if (!TransientResources.GPUBuffers.IsValidIndex(CullResult.GPUBindingIndex))
+			{
+				continue;
+			}
+
+			const FGaussianRDGBufferBinding& Binding = TransientResources.GPUBuffers[CullResult.GPUBindingIndex];
+			FBox WorldBox(EForceInit::ForceInit);
+			if (!TryGetBindingWorldBounds(Inputs, Binding, WorldBox))
+			{
+				continue;
+			}
+
+			const FVector Corners[8] =
+			{
+				FVector(WorldBox.Min),
+				FVector(WorldBox.Min.X, WorldBox.Min.Y, WorldBox.Max.Z),
+				FVector(WorldBox.Min.X, WorldBox.Max.Y, WorldBox.Min.Z),
+				FVector(WorldBox.Min.X, WorldBox.Max.Y, WorldBox.Max.Z),
+				FVector(WorldBox.Max.X, WorldBox.Min.Y, WorldBox.Min.Z),
+				FVector(WorldBox.Max.X, WorldBox.Min.Y, WorldBox.Max.Z),
+				FVector(WorldBox.Max.X, WorldBox.Max.Y, WorldBox.Min.Z),
+				FVector(WorldBox.Max),
+			};
+
+			for (const FVector& Corner : Corners)
+			{
+				const float Depth = static_cast<float>(FVector::DotProduct(Corner, ViewDir));
+				MinDepth = FMath::Min(MinDepth, Depth);
+				MaxDepth = FMath::Max(MaxDepth, Depth);
+			}
+		}
+
+		if (MinDepth >= MaxDepth)
+		{
+			MinDepth = 0.0f;
+			MaxDepth = 100000.0f;
+		}
+
+		const float Margin = (MaxDepth - MinDepth) * 0.01f;
+		OutMinDepth = MinDepth - Margin;
+		OutMaxDepth = MaxDepth + Margin;
+	}
+
+	static bool TryAddGlobalUnifiedConcatAndSortPasses(
+		FRDGBuilder& GraphBuilder,
+		const FGaussianRenderGraph::FPassInputs& Inputs,
+		FGaussianRDGTransientResources& TransientResources,
+		const FGlobalShaderMap* GlobalShaderMap,
+		const TShaderMapRef<FGaussianSortKeysCS>& SortKeysShader,
+		const TShaderMapRef<FGaussianSortExtractCS>& ExtractShader,
+		const TShaderMapRef<FGaussianBitonicSortCS>& BitonicShader,
+		bool bUseRadix)
+	{
+		if (!GaussianSimVerse::RenderSettings::IsGlobalUnifiedSortEnabled()
+			|| TransientResources.CullResults.Num() <= 1)
+		{
+			return false;
+		}
+
+		const TShaderMapRef<FGaussianConcatVisibleCS> ConcatShader(GlobalShaderMap);
+		if (!ConcatShader.IsValid())
+		{
+			return false;
+		}
+
+		const int32 MaxSortElements = FMath::Max(2, GaussianSimVerse::RenderSettings::CVarMaxSortElements.GetValueOnRenderThread());
+		const uint32 NumChunks = static_cast<uint32>(TransientResources.CullResults.Num());
+		uint32 MaxPossibleTotal = 0;
+		for (const FGaussianRDGCullResult& CullResult : TransientResources.CullResults)
+		{
+			MaxPossibleTotal += CullResult.MaxVisibleCount;
+		}
+
+		if (MaxPossibleTotal == 0 || MaxPossibleTotal > static_cast<uint32>(MaxSortElements))
+		{
+			return false;
+		}
+
+		const TShaderMapRef<FGaussianClaimChunkWriteBaseCS> ClaimWriteBaseShader(GlobalShaderMap);
+		const TShaderMapRef<FGaussianClearSortKeysCS> ClearSortKeysShader(GlobalShaderMap);
+		if (!ClaimWriteBaseShader.IsValid() || !ClearSortKeysShader.IsValid())
+		{
+			return false;
+		}
+
+		FRDGBufferRef ChunkWriteBasesBuffer = GraphBuilder.CreateBuffer(
+			FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), NumChunks),
+			TEXT("Gaussian.ChunkWriteBases"));
+		FRDGBufferRef WriteCursorBuffer = GraphBuilder.CreateBuffer(
+			FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), 1),
+			TEXT("Gaussian.GlobalWriteCursor"));
+		FRDGBufferUAVRef ChunkWriteBasesUAV = GraphBuilder.CreateUAV(ChunkWriteBasesBuffer);
+		FRDGBufferUAVRef WriteCursorUAV = GraphBuilder.CreateUAV(WriteCursorBuffer);
+		AddClearUAVPass(GraphBuilder, WriteCursorUAV, 0u);
+
+		for (uint32 ChunkIndex = 0; ChunkIndex < NumChunks; ++ChunkIndex)
+		{
+			const FGaussianRDGCullResult& CullResult = TransientResources.CullResults[ChunkIndex];
+			if (!CullResult.VisibleCountSRV)
+			{
+				continue;
+			}
+
+			FGaussianClaimChunkWriteBaseCS::FParameters* ClaimParams = GraphBuilder.AllocParameters<FGaussianClaimChunkWriteBaseCS::FParameters>();
+			ClaimParams->ChunkIndex = ChunkIndex;
+			ClaimParams->VisibleCountBuffer = CullResult.VisibleCountSRV;
+			ClaimParams->RWChunkWriteBases = ChunkWriteBasesUAV;
+			ClaimParams->RWWriteCursor = WriteCursorUAV;
+			FComputeShaderUtils::AddPass(
+				GraphBuilder,
+				RDG_EVENT_NAME("GaussianSimVerse::ClaimChunkWriteBase %u", ChunkIndex),
+				ERDGPassFlags::Compute,
+				ClaimWriteBaseShader,
+				ClaimParams,
+				FIntVector(1, 1, 1));
+		}
+
+		const FRDGBufferSRVRef ChunkWriteBasesSRV = GraphBuilder.CreateSRV(ChunkWriteBasesBuffer);
+		const FRDGBufferSRVRef TotalVisibleCountSRV = GraphBuilder.CreateSRV(WriteCursorBuffer);
+
+		TArray<FVector4f> ChunkMatrixRows;
+		ChunkMatrixRows.Reserve(TransientResources.GPUBuffers.Num() * 4);
+		for (const FGaussianRDGBufferBinding& Binding : TransientResources.GPUBuffers)
+		{
+			const FMatrix44f Matrix44(Binding.LocalToWorld);
+			for (int32 RowIndex = 0; RowIndex < 4; ++RowIndex)
+			{
+				ChunkMatrixRows.Add(FVector4f(
+					Matrix44.M[RowIndex][0],
+					Matrix44.M[RowIndex][1],
+					Matrix44.M[RowIndex][2],
+					Matrix44.M[RowIndex][3]));
+			}
+		}
+
+		FRDGBufferRef ChunkMatrixRowsBuffer = CreateStructuredUploadBuffer(
+			GraphBuilder,
+			TEXT("Gaussian.GlobalChunkMatrices"),
+			ChunkMatrixRows);
+		const FRDGBufferSRVRef ChunkMatrixRowsSRV = GraphBuilder.CreateSRV(ChunkMatrixRowsBuffer);
+		const FRDGBufferSRVRef ChunkBindingParamsSRV = CreateChunkBindingParamsSRV(
+			GraphBuilder,
+			TransientResources.GPUBuffers,
+			TEXT("Gaussian.GlobalChunkBindingParams"));
+
+		bool bAnySh = false;
+		for (const FGaussianRDGBufferBinding& Binding : TransientResources.GPUBuffers)
+		{
+			if (Binding.bHasShCoefficients != 0)
+			{
+				bAnySh = true;
+				break;
+			}
+		}
+
+		const uint32 UnifiedSplatFloat4Count = MaxPossibleTotal * (sizeof(FGaussianSplatGPU) / sizeof(FVector4f));
+		FRDGBufferRef UnifiedSplatsBuffer = GraphBuilder.CreateBuffer(
+			FRDGBufferDesc::CreateStructuredDesc(sizeof(FVector4f), UnifiedSplatFloat4Count),
+			TEXT("Gaussian.GlobalUnifiedSplats"));
+		FRDGBufferRef BindingIdsBuffer = GraphBuilder.CreateBuffer(
+			FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), MaxPossibleTotal),
+			TEXT("Gaussian.GlobalBindingIds"));
+		FRDGBufferRef UnifiedShBuffer = GraphBuilder.CreateBuffer(
+			FRDGBufferDesc::CreateStructuredDesc(sizeof(float), MaxPossibleTotal * 48u),
+			TEXT("Gaussian.GlobalUnifiedShCoeffs"));
+
+		FRDGBufferUAVRef UnifiedSplatsUAV = GraphBuilder.CreateUAV(UnifiedSplatsBuffer);
+		FRDGBufferUAVRef BindingIdsUAV = GraphBuilder.CreateUAV(BindingIdsBuffer);
+		FRDGBufferUAVRef UnifiedShUAV = GraphBuilder.CreateUAV(UnifiedShBuffer);
+		const TArray<float> DummyShCoefficientsCPU = { 0.0f };
+		FRDGBufferRef DummyShBuffer = CreateStructuredUploadBuffer(
+			GraphBuilder,
+			TEXT("Gaussian.GlobalConcatDummySh"),
+			DummyShCoefficientsCPU);
+		FRDGBufferSRVRef DummyShSRV = GraphBuilder.CreateSRV(DummyShBuffer);
+
+		for (int32 CullIndex = 0; CullIndex < TransientResources.CullResults.Num(); ++CullIndex)
+		{
+			const FGaussianRDGCullResult& CullResult = TransientResources.CullResults[CullIndex];
+			const FGaussianRDGBufferBinding& Binding = TransientResources.GPUBuffers[CullResult.GPUBindingIndex];
+			if (!CullResult.VisibleIndicesSRV || !Binding.SplatSRV)
+			{
+				continue;
+			}
+
+			FGaussianConcatVisibleCS::FParameters* ConcatParams = GraphBuilder.AllocParameters<FGaussianConcatVisibleCS::FParameters>();
+			ConcatParams->ChunkIndex = static_cast<uint32>(CullIndex);
+			ConcatParams->MaxVisibleCount = CullResult.MaxVisibleCount;
+			ConcatParams->BindingIndex = CullResult.GPUBindingIndex;
+			ConcatParams->bCopyShCoefficients = (Binding.bHasShCoefficients != 0) ? 1u : 0u;
+			ConcatParams->ChunkWriteBases = ChunkWriteBasesSRV;
+			ConcatParams->VisibleIndices = CullResult.VisibleIndicesSRV;
+			ConcatParams->VisibleCountBuffer = CullResult.VisibleCountSRV;
+			ConcatParams->GaussianSplatsVec4 = Binding.SplatSRV;
+			ConcatParams->GaussianShCoeffs = Binding.ShCoefficientsSRV ? Binding.ShCoefficientsSRV : DummyShSRV;
+			ConcatParams->RWUnifiedSplatsVec4 = UnifiedSplatsUAV;
+			ConcatParams->RWBindingIds = BindingIdsUAV;
+			ConcatParams->RWUnifiedShCoeffs = UnifiedShUAV;
+
+			const uint32 NumGroups = FMath::DivideAndRoundUp(CullResult.MaxVisibleCount, GaussianThreadGroupSize);
+			FComputeShaderUtils::AddPass(
+				GraphBuilder,
+				RDG_EVENT_NAME("GaussianSimVerse::ConcatVisible B%u", CullResult.GPUBindingIndex),
+				ERDGPassFlags::Compute,
+				ConcatShader,
+				ConcatParams,
+				FIntVector(NumGroups, 1, 1));
+		}
+
+		const uint32 KeyBufferCount = bUseRadix
+			? MaxPossibleTotal
+			: GetPaddedSortCount(MaxPossibleTotal);
+		FRDGBufferRef GlobalSortKeysA = GraphBuilder.CreateBuffer(
+			FRDGBufferDesc::CreateStructuredDesc(sizeof(FUintVector2), KeyBufferCount),
+			TEXT("Gaussian.GlobalSortKeysA"));
+		FRDGBufferRef GlobalSortKeysB = bUseRadix
+			? GraphBuilder.CreateBuffer(
+				FRDGBufferDesc::CreateStructuredDesc(sizeof(FUintVector2), KeyBufferCount),
+				TEXT("Gaussian.GlobalSortKeysB"))
+			: nullptr;
+
+		FRDGBufferUAVRef GlobalSortKeysAUAV = GraphBuilder.CreateUAV(GlobalSortKeysA);
+		{
+			FGaussianClearSortKeysCS::FParameters* ClearParams = GraphBuilder.AllocParameters<FGaussianClearSortKeysCS::FParameters>();
+			ClearParams->KeyCount = KeyBufferCount;
+			ClearParams->RWSortKeys = GlobalSortKeysAUAV;
+			const uint32 NumGroups = FMath::DivideAndRoundUp(KeyBufferCount, GaussianThreadGroupSize);
+			FComputeShaderUtils::AddPass(
+				GraphBuilder,
+				RDG_EVENT_NAME("GaussianSimVerse::ClearGlobalSortKeys (%u)", KeyBufferCount),
+				ERDGPassFlags::Compute,
+				ClearSortKeysShader,
+				ClearParams,
+				FIntVector(NumGroups, 1, 1));
+		}
+
+		const FVector3f CameraViewDirection(Inputs.ViewData.ViewDirection.GetSafeNormal());
+
+		GaussianRenderGraphPrivate::ComputeViewDepthRange(
+			Inputs,
+			TransientResources,
+			TransientResources.ViewDepthMin,
+			TransientResources.ViewDepthMax);
+
+		const TShaderMapRef<FGaussianGlobalUnifiedSortKeysCS> GlobalUnifiedSortKeysShader(GlobalShaderMap);
+		if (!GlobalUnifiedSortKeysShader.IsValid())
+		{
+			return false;
+		}
+
+		{
+			FGaussianGlobalUnifiedSortKeysCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FGaussianGlobalUnifiedSortKeysCS::FParameters>();
+			PassParameters->PaddedCount = KeyBufferCount;
+			PassParameters->CameraViewDirection = CameraViewDirection;
+			PassParameters->ViewDepthMin = TransientResources.ViewDepthMin;
+			PassParameters->ViewDepthMax = TransientResources.ViewDepthMax;
+			PassParameters->TotalVisibleCount = TotalVisibleCountSRV;
+			PassParameters->UnifiedSplatsVec4 = GraphBuilder.CreateSRV(UnifiedSplatsBuffer);
+			PassParameters->BindingIds = GraphBuilder.CreateSRV(BindingIdsBuffer);
+			PassParameters->ChunkMatrixRows = ChunkMatrixRowsSRV;
+			PassParameters->RWSortKeys = GlobalSortKeysAUAV;
+			const uint32 NumGroups = FMath::DivideAndRoundUp(KeyBufferCount, GaussianThreadGroupSize);
+			FComputeShaderUtils::AddPass(
+				GraphBuilder,
+				RDG_EVENT_NAME("GaussianSimVerse::GlobalUnifiedSortKeys (%u)", KeyBufferCount),
+				ERDGPassFlags::Compute,
+				GlobalUnifiedSortKeysShader,
+				PassParameters,
+				FIntVector(NumGroups, 1, 1));
+		}
+
+		FRDGBufferRef GlobalSortedIndicesBuffer = GraphBuilder.CreateBuffer(
+			FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), MaxPossibleTotal),
+			TEXT("Gaussian.GlobalSortedIndices"));
+
+		if (bUseRadix && GlobalSortKeysB)
+		{
+			RunGaussianRadixSort(GraphBuilder, GlobalShaderMap, GlobalSortKeysA, GlobalSortKeysB, KeyBufferCount, TEXT("Global"));
+		}
+		else if (BitonicShader.IsValid())
+		{
+			FRDGBufferUAVRef SortKeysAUAV = GraphBuilder.CreateUAV(GlobalSortKeysA);
+			for (uint32 K = 2; K <= KeyBufferCount; K <<= 1)
+			{
+				for (uint32 J = K >> 1; J > 0; J >>= 1)
+				{
+					FGaussianBitonicSortCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FGaussianBitonicSortCS::FParameters>();
+					PassParameters->K = K;
+					PassParameters->J = J;
+					PassParameters->PaddedCount = KeyBufferCount;
+					PassParameters->RWSortKeys = SortKeysAUAV;
+					const uint32 NumGroups = FMath::DivideAndRoundUp(KeyBufferCount, GaussianThreadGroupSize);
+					FComputeShaderUtils::AddPass(
+						GraphBuilder,
+						RDG_EVENT_NAME("GaussianSimVerse::GlobalBitonicSort K%u J%u", K, J),
+						ERDGPassFlags::Compute,
+						BitonicShader,
+						PassParameters,
+						FIntVector(NumGroups, 1, 1));
+				}
+			}
+		}
+		else
+		{
+			return false;
+		}
+
+		{
+			FGaussianSortExtractCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FGaussianSortExtractCS::FParameters>();
+			PassParameters->MaxVisibleCount = MaxPossibleTotal;
+			// GlobalUnifiedSortKeys already encodes far-to-near order; do not reverse here.
+			PassParameters->bReverseSortedIndices = 0u;
+			PassParameters->SortKeys = GraphBuilder.CreateSRV(GlobalSortKeysA);
+			PassParameters->VisibleCountBuffer = TotalVisibleCountSRV;
+			PassParameters->RWSortedIndices = GraphBuilder.CreateUAV(GlobalSortedIndicesBuffer);
+			const uint32 NumGroups = FMath::DivideAndRoundUp(MaxPossibleTotal, GaussianThreadGroupSize);
+			FComputeShaderUtils::AddPass(
+				GraphBuilder,
+				RDG_EVENT_NAME("GaussianSimVerse::GlobalSortExtract (%u)", MaxPossibleTotal),
+				ERDGPassFlags::Compute,
+				ExtractShader,
+				PassParameters,
+				FIntVector(NumGroups, 1, 1));
+		}
+
+		TransientResources.bUseGlobalUnifiedSort = true;
+		TransientResources.GlobalUnifiedCount = MaxPossibleTotal;
+		TransientResources.GlobalUnifiedSplatsSRV = GraphBuilder.CreateSRV(UnifiedSplatsBuffer);
+		TransientResources.GlobalUnifiedShCoeffsSRV = bAnySh ? GraphBuilder.CreateSRV(UnifiedShBuffer) : nullptr;
+		TransientResources.GlobalBindingIdsSRV = GraphBuilder.CreateSRV(BindingIdsBuffer);
+		TransientResources.GlobalChunkMatrixRowsSRV = ChunkMatrixRowsSRV;
+		TransientResources.GlobalChunkBindingParamsSRV = ChunkBindingParamsSRV;
+		TransientResources.GlobalSortedIndicesSRV = GraphBuilder.CreateSRV(GlobalSortedIndicesBuffer);
+		TransientResources.GlobalVisibleCountSRV = TotalVisibleCountSRV;
+		TransientResources.GlobalDrawBinding = TransientResources.GPUBuffers[TransientResources.CullResults[0].GPUBindingIndex];
+		TransientResources.GlobalDrawBinding.bHasShCoefficients = bAnySh ? 1u : 0u;
+		TransientResources.SortResults.Reset();
+		return true;
 	}
 
 	static void AddGaussianSplatDrawPass(
@@ -143,13 +666,6 @@ namespace GaussianRenderGraphPrivate
 					static_cast<float>(ViewportSize.X), static_cast<float>(ViewportSize.Y), 1.0f);
 				RHICmdList.DrawPrimitive(0, 2, NumInstances);
 			});
-	}
-
-	static uint32 GetPaddedSortCount(uint32 VisibleCount)
-	{
-		const int32 MaxSort = FMath::Max(2, GaussianSimVerse::RenderSettings::CVarMaxSortElements.GetValueOnRenderThread());
-		const uint32 ClampedCount = FMath::Min(VisibleCount, static_cast<uint32>(MaxSort));
-		return FMath::RoundUpToPowerOfTwo(ClampedCount);
 	}
 }
 
@@ -214,15 +730,16 @@ void FGaussianRenderGraph::AddGPUBufferUploadPasses(
 	{
 		for (const FGaussianChunkRenderData& Chunk : SceneProxy.Chunks)
 		{
-			if (!Chunk.GPUBuffer || !Chunk.GPUBuffer->HasValidData())
+			if (!Chunk.GetGPUBuffer() || !Chunk.GetGPUBuffer()->HasValidData())
 			{
 				continue;
 			}
 
 			FGaussianRDGBufferBinding Binding;
-			Binding.SourceBuffer = Chunk.GPUBuffer;
+			Binding.SourceBuffer = Chunk.GetGPUBuffer();
 			Binding.SceneId = SceneProxy.SceneId;
 			Binding.ChunkIndex = Chunk.ChunkIndex;
+			Binding.LodLevel = Chunk.ChunkLodLevel;
 			Binding.LocalToWorld = Chunk.LocalToWorld;
 			// Actor scale * global CVar (default 1.0 matches SuperSplat footprint).
 			Binding.SplatScale = SceneProxy.SplatScale * GaussianSimVerse::RenderSettings::GetSplatScale();
@@ -232,7 +749,7 @@ void FGaussianRenderGraph::AddGPUBufferUploadPasses(
 			Binding.RenderShDegree = static_cast<uint32>(SceneProxy.ShBand);
 			Binding.ColorGrade = SceneProxy.ColorGrade;
 
-			Chunk.GPUBuffer->CommitToGPU(GraphBuilder, Binding);
+			Chunk.GetGPUBuffer()->CommitToGPU(GraphBuilder, Binding);
 
 			if (Binding.SplatBuffer && Binding.PositionSRV)
 			{
@@ -375,6 +892,16 @@ void FGaussianRenderGraph::AddGPUDepthSortPasses(
 	const FPassInputs& Inputs,
 	FGaussianRDGTransientResources& TransientResources)
 {
+	TransientResources.bUseGlobalUnifiedSort = false;
+	TransientResources.GlobalUnifiedCount = 0;
+	TransientResources.GlobalUnifiedSplatsSRV = nullptr;
+	TransientResources.GlobalUnifiedShCoeffsSRV = nullptr;
+	TransientResources.GlobalBindingIdsSRV = nullptr;
+	TransientResources.GlobalChunkMatrixRowsSRV = nullptr;
+	TransientResources.GlobalChunkBindingParamsSRV = nullptr;
+	TransientResources.GlobalSortedIndicesSRV = nullptr;
+	TransientResources.GlobalVisibleCountSRV = nullptr;
+
 	if (TransientResources.CullResults.Num() == 0)
 	{
 		return;
@@ -401,7 +928,28 @@ void FGaussianRenderGraph::AddGPUDepthSortPasses(
 		return;
 	}
 
+	GaussianRenderGraphPrivate::ComputeViewDepthRange(
+		Inputs,
+		TransientResources,
+		TransientResources.ViewDepthMin,
+		TransientResources.ViewDepthMax);
+
+	const FVector3f CameraViewDirection(Inputs.ViewData.ViewDirection.GetSafeNormal());
+
+	if (GaussianRenderGraphPrivate::TryAddGlobalUnifiedConcatAndSortPasses(
+		GraphBuilder, Inputs, TransientResources, GlobalShaderMap, SortKeysShader, ExtractShader, BitonicShader, bUseRadix))
+	{
+		return;
+	}
+
 	TransientResources.SortResults.Reserve(TransientResources.CullResults.Num());
+
+	const TArray<uint32> DummyChunkWriteBase = { 0u };
+	FRDGBufferRef DummyChunkWriteBasesBuffer = CreateStructuredUploadBuffer(
+		GraphBuilder,
+		TEXT("Gaussian.DummyChunkWriteBases"),
+		DummyChunkWriteBase);
+	const FRDGBufferSRVRef DummyChunkWriteBasesSRV = GraphBuilder.CreateSRV(DummyChunkWriteBasesBuffer);
 
 	for (int32 CullIndex = 0; CullIndex < TransientResources.CullResults.Num(); ++CullIndex)
 	{
@@ -438,9 +986,6 @@ void FGaussianRenderGraph::AddGPUDepthSortPasses(
 		}
 
 		const FMatrix44f LocalToWorldMatrix(Binding.LocalToWorld);
-		const FVector3f PreViewTranslation(Inputs.ViewData.PreViewTranslation);
-		const FMatrix44f TranslatedViewMatrix(Inputs.ViewData.TranslatedViewMatrix);
-		const FMatrix44f TranslatedWorldToClip(Inputs.ViewData.TranslatedWorldToClip);
 
 		FRDGBufferRef SortKeysA = GraphBuilder.CreateBuffer(
 			FRDGBufferDesc::CreateStructuredDesc(sizeof(FUintVector2), KeyBufferCount),
@@ -459,11 +1004,13 @@ void FGaussianRenderGraph::AddGPUDepthSortPasses(
 		{
 			FGaussianSortKeysCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FGaussianSortKeysCS::FParameters>();
 			PassParameters->LocalToWorldMatrix = LocalToWorldMatrix;
-			PassParameters->PreViewTranslation = PreViewTranslation;
-			PassParameters->TranslatedViewMatrix = TranslatedViewMatrix;
-			PassParameters->TranslatedWorldToClip = TranslatedWorldToClip;
+			PassParameters->PreViewTranslation = FVector3f(Inputs.ViewData.PreViewTranslation);
+			PassParameters->TranslatedWorldToClip = FMatrix44f(Inputs.ViewData.TranslatedWorldToClip);
 			PassParameters->MaxVisibleCount = MaxVisibleCount;
 			PassParameters->PaddedCount = KeyBufferCount;
+			PassParameters->ChunkIndex = 0u;
+			PassParameters->bUseGlobalIndexPayload = 0u;
+			PassParameters->ChunkWriteBases = DummyChunkWriteBasesSRV;
 			PassParameters->VisibleIndices = CullResult.VisibleIndicesSRV;
 			PassParameters->VisibleCountBuffer = CullResult.VisibleCountSRV;
 			PassParameters->GaussianPositions = Binding.PositionSRV;
@@ -581,6 +1128,7 @@ void FGaussianRenderGraph::AddGPUDepthSortPasses(
 		{
 			FGaussianSortExtractCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FGaussianSortExtractCS::FParameters>();
 			PassParameters->MaxVisibleCount = MaxVisibleCount;
+			PassParameters->bReverseSortedIndices = 0u;
 			PassParameters->SortKeys = GraphBuilder.CreateSRV(SortedKeysBuffer);
 			PassParameters->VisibleCountBuffer = CullResult.VisibleCountSRV;
 			PassParameters->RWSortedIndices = SortedIndicesUAV;
@@ -648,7 +1196,42 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 		TEXT("Gaussian.DummyShCoeffs"),
 		DummyShCoefficientsCPU);
 	FRDGBufferSRVRef DummyShCoefficientsSRV = GraphBuilder.CreateSRV(DummyShCoefficientsBuffer);
+
+	const TArray<uint32> DummyBindingIdCPU = { 0u };
+	FRDGBufferRef DummyBindingIdsBuffer = CreateStructuredUploadBuffer(
+		GraphBuilder,
+		TEXT("Gaussian.DummyBindingIds"),
+		DummyBindingIdCPU);
+	FRDGBufferSRVRef DummyBindingIdsSRV = GraphBuilder.CreateSRV(DummyBindingIdsBuffer);
+
+	const TArray<FVector4f> DummyChunkMatrixRowsCPU =
+	{
+		FVector4f(1.0f, 0.0f, 0.0f, 0.0f),
+		FVector4f(0.0f, 1.0f, 0.0f, 0.0f),
+		FVector4f(0.0f, 0.0f, 1.0f, 0.0f),
+		FVector4f(0.0f, 0.0f, 0.0f, 1.0f),
+	};
+	FRDGBufferRef DummyChunkMatrixRowsBuffer = CreateStructuredUploadBuffer(
+		GraphBuilder,
+		TEXT("Gaussian.DummyChunkMatrixRows"),
+		DummyChunkMatrixRowsCPU);
+	FRDGBufferSRVRef DummyChunkMatrixRowsSRV = GraphBuilder.CreateSRV(DummyChunkMatrixRowsBuffer);
+
+	const TArray<FVector4f> DummyChunkBindingParamsCPU =
+	{
+		FVector4f(1.0f, 2.0f / 255.0f, 7.0f, 0.3f),
+		FVector4f(3.0f, 3.0f, 0.0f, 1.0f),
+		FVector4f(0.0f, 0.0f, 0.0f, 0.0f),
+		FVector4f(1.0f, 1.0f, 1.0f, 1.0f),
+	};
+	FRDGBufferRef DummyChunkBindingParamsBuffer = CreateStructuredUploadBuffer(
+		GraphBuilder,
+		TEXT("Gaussian.DummyChunkBindingParams"),
+		DummyChunkBindingParamsCPU);
+	FRDGBufferSRVRef DummyChunkBindingParamsSRV = GraphBuilder.CreateSRV(DummyChunkBindingParamsBuffer);
+
 	const FVector3f CameraWorldPosition(Inputs.ViewData.ViewOrigin);
+	const FVector3f CameraViewDirection(Inputs.ViewData.ViewDirection.GetSafeNormal());
 
 	// Local 0-based rect for projection and raster — matches SceneColor slice / base-pass render resolution.
 	const FVector4f ViewRect(
@@ -688,6 +1271,7 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 		: TNumericLimits<uint32>::Max();
 	const bool bUseSortResults = GaussianSimVerse::RenderSettings::IsSortEnabled();
 	const bool bDebugOverlay = GaussianSimVerse::RenderSettings::IsDebugOverlayEnabled();
+	const uint32 StreamingDebugRenderMode = static_cast<uint32>(GaussianSimVerse::RenderSettings::GetStreamingDebugRenderMode());
 	const FVector3f PreViewTranslation(Inputs.ViewData.PreViewTranslation);
 	const FMatrix44f TranslatedWorldToClip(Inputs.ViewData.TranslatedWorldToClip);
 	const FMatrix44f TranslatedViewMatrix(Inputs.ViewData.TranslatedViewMatrix);
@@ -763,8 +1347,229 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 			bDrawShadersValid);
 	}
 
+	if (TransientResources.bUseGlobalUnifiedSort
+		&& TransientResources.GlobalSortedIndicesSRV
+		&& TransientResources.GlobalUnifiedSplatsSRV
+		&& TransientResources.GlobalBindingIdsSRV
+		&& TransientResources.GlobalChunkMatrixRowsSRV
+		&& TransientResources.GlobalChunkBindingParamsSRV
+		&& (bTileShadersValid || bDrawShadersValid))
+	{
+		const FGaussianRDGBufferBinding& Binding = TransientResources.GlobalDrawBinding;
+		const uint32 SortedCount = FMath::Min(TransientResources.GlobalUnifiedCount, MaxRasterSplats);
+		FRDGBufferSRVRef GlobalShSRV = TransientResources.GlobalUnifiedShCoeffsSRV
+			? TransientResources.GlobalUnifiedShCoeffsSRV
+			: DummyShCoefficientsSRV;
+
+		// PlayCanvas-style: global sort + per-tile local re-sort/blend for correct transparency at LOD seams.
+		const bool bUseGlobalTilePath = bTileShadersValid && (!bDrawShadersValid || bAdaptiveUseTilePath);
+		if (bUseGlobalTilePath)
+		{
+			FRDGBufferRef TileFillCounterBuffer = GraphBuilder.CreateBuffer(
+				FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), NumTiles),
+				TEXT("Gaussian.GlobalTileFillCounters"));
+			FRDGBufferUAVRef TileFillCounterUAV = GraphBuilder.CreateUAV(TileFillCounterBuffer);
+			FRDGBufferSRVRef TileFillCounterSRV = GraphBuilder.CreateSRV(TileFillCounterBuffer);
+			AddClearUAVPass(GraphBuilder, TileFillCounterUAV, 0u);
+
+			const uint32 TotalTileSlots = NumTiles * MaxSplatsPerTile;
+			FRDGBufferRef TileSplatsBuffer = GraphBuilder.CreateBuffer(
+				FRDGBufferDesc::CreateStructuredDesc(sizeof(FUintVector2), TotalTileSlots),
+				TEXT("Gaussian.GlobalTileSplats"));
+			FRDGBufferUAVRef TileSplatsUAV = GraphBuilder.CreateUAV(TileSplatsBuffer);
+			FRDGBufferSRVRef TileSplatsSRV = GraphBuilder.CreateSRV(TileSplatsBuffer);
+
+			FGaussianBinSplatsFillCS::FParameters* FillParameters = GraphBuilder.AllocParameters<FGaussianBinSplatsFillCS::FParameters>();
+			FillParameters->LocalToWorldMatrix = FMatrix44f::Identity;
+			FillParameters->PreViewTranslation = PreViewTranslation;
+			FillParameters->TranslatedViewMatrix = TranslatedViewMatrix;
+			FillParameters->TranslatedWorldToClip = TranslatedWorldToClip;
+			FillParameters->ViewportRect = ViewportRect;
+			FillParameters->ViewRect = ViewRect;
+			FillParameters->SortedCount = SortedCount;
+			FillParameters->GaussianCount = TransientResources.GlobalUnifiedCount;
+			FillParameters->NumTilesX = NumTilesX;
+			FillParameters->NumTilesY = NumTilesY;
+			FillParameters->MaxTileSplats = MaxSplatsPerTile;
+			FillParameters->SplatScale = Binding.SplatScale;
+			FillParameters->GaussianAlphaCutoff = GaussianAlphaCutoff;
+			FillParameters->GaussianAlphaCullThreshold = Binding.AlphaCullThreshold;
+			FillParameters->GaussianCutoffK = Binding.CutoffK;
+			FillParameters->GaussianCovarianceDilation = Binding.CovarianceDilation;
+			FillParameters->GaussianMinSigmaPixels = GaussianMinSigmaPixels;
+			FillParameters->MaxRasterRadius = MaxRasterRadius;
+			FillParameters->bDebugOverlay = bDebugOverlay ? 1u : 0u;
+			FillParameters->CameraViewDirection = CameraViewDirection;
+			FillParameters->ViewDepthMin = TransientResources.ViewDepthMin;
+			FillParameters->ViewDepthMax = TransientResources.ViewDepthMax;
+			FillParameters->bUseGlobalChunkLookup = 1u;
+			FillParameters->SortedIndices = TransientResources.GlobalSortedIndicesSRV;
+			FillParameters->VisibleCountBuffer = TransientResources.GlobalVisibleCountSRV;
+			FillParameters->BindingIds = TransientResources.GlobalBindingIdsSRV;
+			FillParameters->ChunkMatrixRows = TransientResources.GlobalChunkMatrixRowsSRV;
+			FillParameters->ChunkBindingParams = TransientResources.GlobalChunkBindingParamsSRV;
+			FillParameters->GaussianSplatsVec4 = TransientResources.GlobalUnifiedSplatsSRV;
+			FillParameters->TileOffsets = TileOffsetsSRV;
+			FillParameters->RWTileFillCounters = TileFillCounterUAV;
+			FillParameters->RWTileSplats = TileSplatsUAV;
+
+			const uint32 FillGroups = FMath::DivideAndRoundUp(SortedCount, GaussianThreadGroupSize);
+			FComputeShaderUtils::AddPass(
+				GraphBuilder,
+				RDG_EVENT_NAME("GaussianSimVerse::GlobalTileFill (%u splats)", SortedCount),
+				ERDGPassFlags::Compute,
+				BinFillShader,
+				FillParameters,
+				FIntVector(FillGroups, 1, 1));
+
+			FGaussianTileSortCS::FParameters* SortParameters = GraphBuilder.AllocParameters<FGaussianTileSortCS::FParameters>();
+			SortParameters->NumTilesX = NumTilesX;
+			SortParameters->NumTilesY = NumTilesY;
+			SortParameters->MaxTileSplats = MaxSplatsPerTile;
+			SortParameters->TileOffsets = TileOffsetsSRV;
+			SortParameters->TileCounts = TileFillCounterSRV;
+			SortParameters->RWTileSplats = TileSplatsUAV;
+
+			FComputeShaderUtils::AddPass(
+				GraphBuilder,
+				RDG_EVENT_NAME("GaussianSimVerse::GlobalTileSort (%ux%u tiles)", NumTilesX, NumTilesY),
+				ERDGPassFlags::Compute,
+				TileSortShader,
+				SortParameters,
+				FIntVector(NumTilesX, NumTilesY, 1));
+
+			FGaussianTileBlendCS::FParameters* BlendParameters = GraphBuilder.AllocParameters<FGaussianTileBlendCS::FParameters>();
+			BlendParameters->LocalToWorldMatrix = FMatrix44f::Identity;
+			BlendParameters->PreViewTranslation = PreViewTranslation;
+			BlendParameters->TranslatedViewMatrix = TranslatedViewMatrix;
+			BlendParameters->TranslatedWorldToClip = TranslatedWorldToClip;
+			BlendParameters->ViewportRect = ViewportRect;
+			BlendParameters->ViewRect = ViewRect;
+			BlendParameters->NumTilesX = NumTilesX;
+			BlendParameters->NumTilesY = NumTilesY;
+			BlendParameters->NumTiles = NumTiles;
+			BlendParameters->GaussianCount = TransientResources.GlobalUnifiedCount;
+			BlendParameters->MaxTileSplats = MaxSplatsPerTile;
+			BlendParameters->SplatScale = Binding.SplatScale;
+			BlendParameters->GaussianAlphaCutoff = GaussianAlphaCutoff;
+			BlendParameters->GaussianAlphaCullThreshold = Binding.AlphaCullThreshold;
+			BlendParameters->GaussianCutoffK = Binding.CutoffK;
+			BlendParameters->GaussianCovarianceDilation = Binding.CovarianceDilation;
+			BlendParameters->GaussianMinSigmaPixels = GaussianMinSigmaPixels;
+			BlendParameters->MaxRasterRadius = MaxRasterRadius;
+			BlendParameters->bDebugOverlay = bDebugOverlay ? 1u : 0u;
+			BlendParameters->StreamingDebugRenderMode = StreamingDebugRenderMode;
+			BlendParameters->RenderShDegree = Binding.RenderShDegree;
+			BlendParameters->ImportedShDegree = Binding.ImportedShDegree;
+			BlendParameters->bHasShCoefficients = Binding.bHasShCoefficients;
+			BlendParameters->CameraWorldPosition = CameraWorldPosition;
+			BlendParameters->bUseGlobalChunkLookup = 1u;
+			GaussianRenderGraphPrivate::FillGaussianColorGradeUniforms(
+				BlendParameters->GaussianClrOffset,
+				BlendParameters->GaussianClrScaleRGB,
+				BlendParameters->GaussianSaturation,
+				BlendParameters->GaussianTransparencyMultiplier,
+				Binding.ColorGrade);
+			BlendParameters->TileOffsets = TileOffsetsSRV;
+			BlendParameters->TileCounts = TileFillCounterSRV;
+			BlendParameters->TileSplats = TileSplatsSRV;
+			BlendParameters->SortedIndices = TransientResources.GlobalSortedIndicesSRV;
+			BlendParameters->BindingIds = TransientResources.GlobalBindingIdsSRV;
+			BlendParameters->ChunkMatrixRows = TransientResources.GlobalChunkMatrixRowsSRV;
+			BlendParameters->ChunkBindingParams = TransientResources.GlobalChunkBindingParamsSRV;
+			BlendParameters->GaussianSplatsVec4 = TransientResources.GlobalUnifiedSplatsSRV;
+			BlendParameters->GaussianShCoeffs = GlobalShSRV;
+			BlendParameters->RWOverlay = OverlayUAV;
+
+			FComputeShaderUtils::AddPass(
+				GraphBuilder,
+				RDG_EVENT_NAME("GaussianSimVerse::GlobalTileBlend (%ux%u tiles)", NumTilesX, NumTilesY),
+				ERDGPassFlags::Compute,
+				TileBlendShader,
+				BlendParameters,
+				FIntVector(NumTilesX, NumTilesY, 1));
+		}
+		else if (bDrawShadersValid)
+		{
+			for (uint32 BatchStart = 0; BatchStart < SortedCount; BatchStart += GaussianRenderGraphPrivate::SplatsPerDrawBatch)
+			{
+				const uint32 BatchCount = FMath::Min(
+					GaussianRenderGraphPrivate::SplatsPerDrawBatch,
+					SortedCount - BatchStart);
+
+				FGaussianSplatDrawPS::FParameters* DrawParameters = GraphBuilder.AllocParameters<FGaussianSplatDrawPS::FParameters>();
+				GaussianRenderGraphPrivate::FillGaussianSplatDrawParameters(
+					DrawParameters->Shared,
+					FMatrix44f::Identity,
+					PreViewTranslation,
+					TranslatedViewMatrix,
+					TranslatedWorldToClip,
+					ViewportRect,
+					ViewRect,
+					BatchStart,
+					BatchCount,
+					SortedCount,
+					TransientResources.GlobalUnifiedCount,
+					Binding.SplatScale,
+					GaussianAlphaCutoff,
+					Binding.AlphaCullThreshold,
+					Binding.CutoffK,
+					Binding.CovarianceDilation,
+					GaussianMinSigmaPixels,
+					MaxRasterRadius,
+					bDebugOverlay,
+					StreamingDebugRenderMode,
+					Binding.RenderShDegree,
+					Binding.ImportedShDegree,
+					Binding.bHasShCoefficients,
+					CameraWorldPosition,
+					Binding.ColorGrade,
+					TransientResources.GlobalSortedIndicesSRV,
+					TransientResources.GlobalVisibleCountSRV,
+					TransientResources.GlobalUnifiedSplatsSRV,
+					GlobalShSRV,
+					TransientResources.GlobalBindingIdsSRV,
+					TransientResources.GlobalChunkMatrixRowsSRV,
+					TransientResources.GlobalChunkBindingParamsSRV,
+					1u);
+				DrawParameters->RenderTargets[0] = FRenderTargetBinding(OverlayTexture, ERenderTargetLoadAction::ELoad);
+
+				GaussianRenderGraphPrivate::AddGaussianSplatDrawPass(
+					GraphBuilder,
+					RDG_EVENT_NAME("GaussianSimVerse::GlobalSplatDraw (%u..%u)", BatchStart, BatchStart + BatchCount),
+					GlobalShaderMap,
+					DrawParameters,
+					OverlayExtent,
+					BatchCount);
+			}
+		}
+
+		TotalRasterSplats = SortedCount;
+	}
+	else
+	{
+	TArray<int32> SortedCullIndices;
+	SortedCullIndices.Reserve(TransientResources.CullResults.Num());
 	for (int32 CullIndex = 0; CullIndex < TransientResources.CullResults.Num(); ++CullIndex)
 	{
+		SortedCullIndices.Add(CullIndex);
+	}
+
+	const FVector ViewOrigin = Inputs.ViewData.ViewOrigin;
+	SortedCullIndices.Sort([&TransientResources, ViewOrigin](int32 A, int32 B)
+	{
+		const FGaussianRDGCullResult& CullA = TransientResources.CullResults[A];
+		const FGaussianRDGCullResult& CullB = TransientResources.CullResults[B];
+		const FGaussianRDGBufferBinding& BindingA = TransientResources.GPUBuffers[CullA.GPUBindingIndex];
+		const FGaussianRDGBufferBinding& BindingB = TransientResources.GPUBuffers[CullB.GPUBindingIndex];
+		const float DepthA = GaussianRenderGraphPrivate::GetChunkDepthSquared(BindingA, ViewOrigin);
+		const float DepthB = GaussianRenderGraphPrivate::GetChunkDepthSquared(BindingB, ViewOrigin);
+		return DepthA > DepthB;
+	});
+
+	for (int32 SortedIndex = 0; SortedIndex < SortedCullIndices.Num(); ++SortedIndex)
+	{
+		const int32 CullIndex = SortedCullIndices[SortedIndex];
 		const FGaussianRDGCullResult& CullResult = TransientResources.CullResults[CullIndex];
 		FRDGBufferSRVRef SortedIndicesSRV = CullResult.VisibleIndicesSRV;
 		uint32 SortedCount = CullResult.MaxVisibleCount;
@@ -932,8 +1737,15 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 			FillParameters->GaussianMinSigmaPixels = GaussianMinSigmaPixels;
 			FillParameters->MaxRasterRadius = MaxRasterRadius;
 			FillParameters->bDebugOverlay = bDebugOverlay ? 1u : 0u;
+			FillParameters->CameraViewDirection = CameraViewDirection;
+			FillParameters->ViewDepthMin = TransientResources.ViewDepthMin;
+			FillParameters->ViewDepthMax = TransientResources.ViewDepthMax;
+			FillParameters->bUseGlobalChunkLookup = 0u;
 			FillParameters->SortedIndices = SortedIndicesSRV;
 			FillParameters->VisibleCountBuffer = CullResult.VisibleCountSRV;
+			FillParameters->BindingIds = DummyBindingIdsSRV;
+			FillParameters->ChunkMatrixRows = DummyChunkMatrixRowsSRV;
+			FillParameters->ChunkBindingParams = DummyChunkBindingParamsSRV;
 			FillParameters->GaussianSplatsVec4 = Binding.SplatSRV;
 			FillParameters->TileOffsets = TileOffsetsSRV;
 			FillParameters->RWTileFillCounters = TileFillCounterUAV;
@@ -984,10 +1796,12 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 			BlendParameters->GaussianMinSigmaPixels = GaussianMinSigmaPixels;
 			BlendParameters->MaxRasterRadius = MaxRasterRadius;
 			BlendParameters->bDebugOverlay = bDebugOverlay ? 1u : 0u;
+			BlendParameters->StreamingDebugRenderMode = StreamingDebugRenderMode;
 			BlendParameters->RenderShDegree = Binding.RenderShDegree;
 			BlendParameters->ImportedShDegree = Binding.ImportedShDegree;
 			BlendParameters->bHasShCoefficients = Binding.bHasShCoefficients;
 			BlendParameters->CameraWorldPosition = CameraWorldPosition;
+			BlendParameters->bUseGlobalChunkLookup = 0u;
 			GaussianRenderGraphPrivate::FillGaussianColorGradeUniforms(
 				BlendParameters->GaussianClrOffset,
 				BlendParameters->GaussianClrScaleRGB,
@@ -998,6 +1812,9 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 			BlendParameters->TileCounts = TileFillCounterSRV;
 			BlendParameters->TileSplats = TileSplatsSRV;
 			BlendParameters->SortedIndices = SortedIndicesSRV;
+			BlendParameters->BindingIds = DummyBindingIdsSRV;
+			BlendParameters->ChunkMatrixRows = DummyChunkMatrixRowsSRV;
+			BlendParameters->ChunkBindingParams = DummyChunkBindingParamsSRV;
 			BlendParameters->GaussianSplatsVec4 = Binding.SplatSRV;
 			BlendParameters->GaussianShCoeffs = Binding.ShCoefficientsSRV ? Binding.ShCoefficientsSRV : DummyShCoefficientsSRV;
 			BlendParameters->RWOverlay = OverlayUAV;
@@ -1039,6 +1856,7 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 					GaussianMinSigmaPixels,
 					MaxRasterRadius,
 					bDebugOverlay,
+					StreamingDebugRenderMode,
 					Binding.RenderShDegree,
 					Binding.ImportedShDegree,
 					Binding.bHasShCoefficients,
@@ -1047,7 +1865,10 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 					SortedIndicesSRV,
 					CullResult.VisibleCountSRV,
 					Binding.SplatSRV,
-					Binding.ShCoefficientsSRV ? Binding.ShCoefficientsSRV : DummyShCoefficientsSRV);
+					Binding.ShCoefficientsSRV ? Binding.ShCoefficientsSRV : DummyShCoefficientsSRV,
+					DummyBindingIdsSRV,
+					DummyChunkMatrixRowsSRV,
+					DummyChunkBindingParamsSRV);
 
 				DrawParameters->RenderTargets[0] = FRenderTargetBinding(OverlayTexture, ERenderTargetLoadAction::ELoad);
 
@@ -1087,6 +1908,7 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 				PassParameters->GaussianMinSigmaPixels = GaussianMinSigmaPixels;
 				PassParameters->MaxRasterRadius = MaxRasterRadius;
 				PassParameters->bDebugOverlay = bDebugOverlay ? 1u : 0u;
+				PassParameters->StreamingDebugRenderMode = StreamingDebugRenderMode;
 				PassParameters->RenderShDegree = Binding.RenderShDegree;
 				PassParameters->ImportedShDegree = Binding.ImportedShDegree;
 				PassParameters->bHasShCoefficients = Binding.bHasShCoefficients;
@@ -1115,6 +1937,7 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 		}
 
 		TotalRasterSplats += SortedCount;
+	}
 	}
 
 	if (TotalRasterSplats > 0)

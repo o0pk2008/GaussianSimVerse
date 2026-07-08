@@ -111,7 +111,14 @@ namespace GaussianSimVerse::RenderSettings
 		0,
 		TEXT("Log per-frame Gaussian raster stats.\n")
 		TEXT("0: Off (default)\n")
-		TEXT("1: On"),
+		TEXT("1: On\n")
+		TEXT("Alias: r.GaussianSimVerse.RenderDebug"),
+		ECVF_RenderThreadSafe);
+
+	TAutoConsoleVariable<int32> CVarRenderDebug(
+		TEXT("r.GaussianSimVerse.RenderDebug"),
+		0,
+		TEXT("Alias for r.GaussianSimVerse.DebugRender — log per-frame Gaussian raster stats."),
 		ECVF_RenderThreadSafe);
 
 	TAutoConsoleVariable<int32> CVarDebugOverlay(
@@ -207,4 +214,75 @@ namespace GaussianSimVerse::RenderSettings
 		TEXT("0: BeforeDOF\n")
 		TEXT("1: AfterDOF (default)"),
 		ECVF_RenderThreadSafe);
+
+	TAutoConsoleVariable<int32> CVarStreamingEnable(
+		TEXT("r.GaussianSimVerse.Streaming.Enable"),
+		1,
+		TEXT("Enable runtime LOD streaming for GaussianStreamedSceneActor.\n")
+		TEXT("0: Disabled\n")
+		TEXT("1: Enabled (default)"),
+		ECVF_Default);
+
+	TAutoConsoleVariable<float> CVarStreamingLoadRadius(
+		TEXT("r.GaussianSimVerse.Streaming.LoadRadius"),
+		50000.0f,
+		TEXT("World units around the view origin where streamed chunks may load."),
+		ECVF_Default);
+
+	TAutoConsoleVariable<float> CVarStreamingLodBaseDistance(
+		TEXT("r.GaussianSimVerse.Streaming.LodBaseDistance"),
+		1.0f,
+		TEXT("Base distance metric for streamed LOD selection (higher = coarser LOD sooner)."),
+		ECVF_Default);
+
+	TAutoConsoleVariable<float> CVarStreamingLodMultiplier(
+		TEXT("r.GaussianSimVerse.Streaming.LodMultiplier"),
+		1.0f,
+		TEXT("Additional scale on streamed LOD metric."),
+		ECVF_Default);
+
+	TAutoConsoleVariable<int32> CVarStreamingMaxLoadedSplats(
+		TEXT("r.GaussianSimVerse.Streaming.MaxLoadedSplats"),
+		4000000,
+		TEXT("Maximum resident splats across all streamed chunks (0 = unlimited)."),
+		ECVF_Default);
+
+	TAutoConsoleVariable<int32> CVarStreamingMaxLoadsPerFrame(
+		TEXT("r.GaussianSimVerse.Streaming.MaxLoadsPerFrame"),
+		2,
+		TEXT("Maximum async chunk loads started per frame."),
+		ECVF_Default);
+
+	TAutoConsoleVariable<int32> CVarStreamingDebugDraw(
+		TEXT("r.GaussianSimVerse.Streaming.DebugDraw"),
+		0,
+		TEXT("Draw streamed LOD octree bounds in the viewport.\n")
+		TEXT("0: Off (default)\n")
+		TEXT("1: On"),
+		ECVF_Default);
+
+	TAutoConsoleVariable<int32> CVarStreamingDebugOverlay(
+		TEXT("r.GaussianSimVerse.Streaming.DebugOverlay"),
+		0,
+		TEXT("Show on-screen streamed chunk statistics.\n")
+		TEXT("0: Off (default)\n")
+		TEXT("1: On"),
+		ECVF_Default);
+
+	TAutoConsoleVariable<int32> CVarStreamingDebugRenderMode(
+		TEXT("r.GaussianSimVerse.Streaming.DebugRenderMode"),
+		0,
+		TEXT("Streamed scene debug render mode.\n")
+		TEXT("0: None (default)\n")
+		TEXT("1: LOD (color-code chunks by LOD level)"),
+		ECVF_Default);
+
+	TAutoConsoleVariable<int32> CVarGlobalUnifiedSort(
+		TEXT("r.GaussianSimVerse.GlobalUnifiedSort"),
+		1,
+		TEXT("When multiple chunks are visible, merge them into one global depth-sorted draw.\n")
+		TEXT("Fixes front/back seams between streamed LOD chunks.\n")
+		TEXT("0: Per-chunk sort (legacy)\n")
+		TEXT("1: Global unified sort (default)"),
+		ECVF_RenderThreadSafe | ECVF_Scalability);
 }

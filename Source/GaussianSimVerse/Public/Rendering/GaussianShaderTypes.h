@@ -55,11 +55,13 @@ public:
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER(FMatrix44f, LocalToWorldMatrix)
 		SHADER_PARAMETER(FVector3f, PreViewTranslation)
-		SHADER_PARAMETER(FMatrix44f, TranslatedViewMatrix)
 		SHADER_PARAMETER(FMatrix44f, TranslatedWorldToClip)
-		SHADER_PARAMETER(uint32, MaxVisibleCount)
-		SHADER_PARAMETER(uint32, PaddedCount)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, VisibleIndices)
+	SHADER_PARAMETER(uint32, MaxVisibleCount)
+	SHADER_PARAMETER(uint32, PaddedCount)
+	SHADER_PARAMETER(uint32, ChunkIndex)
+	SHADER_PARAMETER(uint32, bUseGlobalIndexPayload)
+	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, ChunkWriteBases)
+	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, VisibleIndices)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, VisibleCountBuffer)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, GaussianPositions)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint2>, RWSortKeys)
@@ -94,9 +96,122 @@ public:
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER(uint32, MaxVisibleCount)
+		SHADER_PARAMETER(uint32, bReverseSortedIndices)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint2>, SortKeys)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, VisibleCountBuffer)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, RWSortedIndices)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
+};
+
+class GAUSSIANSIMVERSE_API FGaussianConcatVisibleCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FGaussianConcatVisibleCS);
+	SHADER_USE_PARAMETER_STRUCT(FGaussianConcatVisibleCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER(uint32, ChunkIndex)
+		SHADER_PARAMETER(uint32, MaxVisibleCount)
+		SHADER_PARAMETER(uint32, BindingIndex)
+		SHADER_PARAMETER(uint32, bCopyShCoefficients)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, ChunkWriteBases)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, VisibleIndices)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, VisibleCountBuffer)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, GaussianSplatsVec4)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, GaussianShCoeffs)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, RWUnifiedSplatsVec4)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, RWBindingIds)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float>, RWUnifiedShCoeffs)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
+};
+
+class GAUSSIANSIMVERSE_API FGaussianGlobalUnifiedSortKeysCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FGaussianGlobalUnifiedSortKeysCS);
+	SHADER_USE_PARAMETER_STRUCT(FGaussianGlobalUnifiedSortKeysCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER(uint32, PaddedCount)
+		SHADER_PARAMETER(FVector3f, CameraViewDirection)
+		SHADER_PARAMETER(float, ViewDepthMin)
+		SHADER_PARAMETER(float, ViewDepthMax)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, TotalVisibleCount)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, UnifiedSplatsVec4)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, BindingIds)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, ChunkMatrixRows)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint2>, RWSortKeys)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
+};
+
+class GAUSSIANSIMVERSE_API FGaussianClaimChunkWriteBaseCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FGaussianClaimChunkWriteBaseCS);
+	SHADER_USE_PARAMETER_STRUCT(FGaussianClaimChunkWriteBaseCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER(uint32, ChunkIndex)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, VisibleCountBuffer)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, RWChunkWriteBases)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, RWWriteCursor)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
+};
+
+class GAUSSIANSIMVERSE_API FGaussianCopyChunkVisibleCountCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FGaussianCopyChunkVisibleCountCS);
+	SHADER_USE_PARAMETER_STRUCT(FGaussianCopyChunkVisibleCountCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER(uint32, ChunkIndex)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, VisibleCountBuffer)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, RWChunkVisibleCounts)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
+};
+
+class GAUSSIANSIMVERSE_API FGaussianChunkVisiblePrefixSumCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FGaussianChunkVisiblePrefixSumCS);
+	SHADER_USE_PARAMETER_STRUCT(FGaussianChunkVisiblePrefixSumCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER(uint32, NumChunks)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, ChunkVisibleCounts)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, RWChunkWriteBases)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, RWTotalVisibleCount)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
+};
+
+class GAUSSIANSIMVERSE_API FGaussianClearSortKeysCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FGaussianClearSortKeysCS);
+	SHADER_USE_PARAMETER_STRUCT(FGaussianClearSortKeysCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER(uint32, KeyCount)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint2>, RWSortKeys)
 	END_SHADER_PARAMETER_STRUCT()
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
@@ -232,8 +347,15 @@ public:
 		SHADER_PARAMETER(float, GaussianMinSigmaPixels)
 		SHADER_PARAMETER(uint32, MaxRasterRadius)
 		SHADER_PARAMETER(uint32, bDebugOverlay)
+		SHADER_PARAMETER(FVector3f, CameraViewDirection)
+		SHADER_PARAMETER(float, ViewDepthMin)
+		SHADER_PARAMETER(float, ViewDepthMax)
+		SHADER_PARAMETER(uint32, bUseGlobalChunkLookup)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, SortedIndices)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, VisibleCountBuffer)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, BindingIds)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, ChunkMatrixRows)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, ChunkBindingParams)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, GaussianSplatsVec4)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, TileOffsets)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, RWTileFillCounters)
@@ -293,14 +415,19 @@ public:
 		SHADER_PARAMETER(uint32, ImportedShDegree)
 		SHADER_PARAMETER(uint32, bHasShCoefficients)
 		SHADER_PARAMETER(FVector3f, CameraWorldPosition)
+		SHADER_PARAMETER(uint32, bUseGlobalChunkLookup)
 		SHADER_PARAMETER(FVector3f, GaussianClrOffset)
 		SHADER_PARAMETER(FVector3f, GaussianClrScaleRGB)
 		SHADER_PARAMETER(float, GaussianSaturation)
 		SHADER_PARAMETER(float, GaussianTransparencyMultiplier)
+		SHADER_PARAMETER(uint32, StreamingDebugRenderMode)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, TileOffsets)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, TileCounts)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint2>, TileSplats)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, SortedIndices)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, BindingIds)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, ChunkMatrixRows)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, ChunkBindingParams)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, GaussianSplatsVec4)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, GaussianShCoeffs)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWOverlay)
@@ -338,8 +465,13 @@ BEGIN_SHADER_PARAMETER_STRUCT(FGaussianSplatDrawSharedParameters, )
 	SHADER_PARAMETER(FVector3f, GaussianClrScaleRGB)
 	SHADER_PARAMETER(float, GaussianSaturation)
 	SHADER_PARAMETER(float, GaussianTransparencyMultiplier)
+	SHADER_PARAMETER(uint32, StreamingDebugRenderMode)
+	SHADER_PARAMETER(uint32, bUseGlobalChunkLookup)
 	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, SortedIndices)
 	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, VisibleCountBuffer)
+	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, BindingIds)
+	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, ChunkMatrixRows)
+	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, ChunkBindingParams)
 	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, GaussianSplatsVec4)
 	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, GaussianShCoeffs)
 END_SHADER_PARAMETER_STRUCT()
@@ -405,6 +537,7 @@ public:
 		SHADER_PARAMETER(FVector3f, GaussianClrScaleRGB)
 		SHADER_PARAMETER(float, GaussianSaturation)
 		SHADER_PARAMETER(float, GaussianTransparencyMultiplier)
+		SHADER_PARAMETER(uint32, StreamingDebugRenderMode)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, SortedIndices)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, VisibleCountBuffer)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, GaussianSplatsVec4)

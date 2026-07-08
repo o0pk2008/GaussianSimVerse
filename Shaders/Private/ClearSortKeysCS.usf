@@ -1,0 +1,19 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+// Initialize sort key buffer to far sentinel values.
+
+#include "/Engine/Public/Platform.ush"
+
+uint KeyCount;
+RWStructuredBuffer<uint2> RWSortKeys;
+
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	const uint ElementIndex = DispatchThreadId.x;
+	if (ElementIndex >= KeyCount)
+	{
+		return;
+	}
+
+	RWSortKeys[ElementIndex] = uint2(0xFFFFFFFF, 0xFFFFFFFF);
+}

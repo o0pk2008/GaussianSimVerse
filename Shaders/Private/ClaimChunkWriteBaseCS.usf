@@ -1,0 +1,18 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+// Claim a compact write range for one chunk's visible splats (serial per-chunk passes).
+
+#include "/Engine/Public/Platform.ush"
+
+uint ChunkIndex;
+StructuredBuffer<uint> VisibleCountBuffer;
+RWStructuredBuffer<uint> RWChunkWriteBases;
+RWStructuredBuffer<uint> RWWriteCursor;
+
+[numthreads(1, 1, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	const uint VisibleCount = VisibleCountBuffer[0];
+	uint WriteBase;
+	InterlockedAdd(RWWriteCursor[0], VisibleCount, WriteBase);
+	RWChunkWriteBases[ChunkIndex] = WriteBase;
+}

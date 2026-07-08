@@ -9,6 +9,7 @@ StructuredBuffer<uint> VisibleCountBuffer;
 RWStructuredBuffer<uint> RWSortedIndices;
 
 uint MaxVisibleCount;
+uint bReverseSortedIndices;
 
 [numthreads(THREADGROUP_SIZE, 1, 1)]
 void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
@@ -20,5 +21,8 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 		return;
 	}
 
-	RWSortedIndices[ElementIndex] = SortKeys[ElementIndex].y;
+	const uint SortedKeyIndex = bReverseSortedIndices != 0u
+		? (VisibleCount - 1u - ElementIndex)
+		: ElementIndex;
+	RWSortedIndices[ElementIndex] = SortKeys[SortedKeyIndex].y;
 }

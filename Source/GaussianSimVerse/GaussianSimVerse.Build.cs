@@ -34,7 +34,16 @@ public class GaussianSimVerse : ModuleRules
 			"Renderer",
 			"Slate",
 			"SlateCore",
+			"Json",
+			"JsonUtilities",
+			"ImageWrapper",
+			"FreeImage",
 		});
+
+		if (Target.bBuildEditor)
+		{
+			PrivateDependencyModuleNames.Add("UnrealEd");
+		}
 
 		string RendererPath = Path.Combine(EngineDirectory, "Source", "Runtime", "Renderer");
 		PrivateIncludePaths.AddRange(new string[]
