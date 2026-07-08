@@ -9,6 +9,7 @@
 
 #if WITH_EDITOR
 #include "EditorViewportClient.h"
+#include "Containers/Ticker.h"
 #endif
 
 #include "GaussianStreamedSceneActor.generated.h"
@@ -68,7 +69,7 @@ public:
 	int32 StreamingMaxLoadedSplats = 4000000;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Streaming|CVar Overrides", meta = (DisplayName = "Max Loads Per Frame", ClampMin = "1", ClampMax = "16", UIMin = "1", UIMax = "16", EditCondition = "bApplyStreamingCVarOverrides"))
-	int32 StreamingMaxLoadsPerFrame = 2;
+	int32 StreamingMaxLoadsPerFrame = 8;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Streaming|CVar Overrides", meta = (DisplayName = "Debug Draw Octree", EditCondition = "bApplyStreamingCVarOverrides"))
 	bool bStreamingDebugDraw = false;
@@ -119,10 +120,17 @@ private:
 	void SnapActorToSceneOrigin();
 	void UpdateBoundsVisual();
 	FVector GetStreamingViewOrigin() const;
+	FVector GetStreamingViewDirection() const;
 	void ApplyStreamingCVarOverrides() const;
+	void UpdateStreamingFromView();
 #if WITH_EDITOR
 	void HandleEditorCameraMoved(const FVector& Location, const FRotator& Rotation, ELevelViewportType ViewportType, int32 ViewIndex);
+	bool HandleEditorStreamingTick(float DeltaTime);
+	void EnsureEditorStreamingTickInterval();
 	FDelegateHandle EditorCameraMovedHandle;
+	FTSTicker::FDelegateHandle EditorStreamingTickHandle;
+	double LastEditorStreamingUpdateSeconds = 0.0;
+	float EditorStreamingTickInterval = 0.0f;
 #endif
 
 	FGaussianStreamingManager StreamingManager;

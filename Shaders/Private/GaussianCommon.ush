@@ -275,14 +275,24 @@ float ApplyGaussianTransparency(float Opacity, float TransparencyMultiplier)
 float3 GetGaussianLodDebugColor(uint LodLevel)
 {
 	const uint Palette = LodLevel % 8u;
-	if (Palette == 0u) return float3(1.0, 0.2, 0.2);
-	if (Palette == 1u) return float3(0.2, 1.0, 0.2);
-	if (Palette == 2u) return float3(0.2, 0.5, 1.0);
-	if (Palette == 3u) return float3(1.0, 0.9, 0.2);
-	if (Palette == 4u) return float3(1.0, 0.2, 1.0);
-	if (Palette == 5u) return float3(0.2, 1.0, 1.0);
-	if (Palette == 6u) return float3(1.0, 0.6, 0.2);
-	return float3(0.7, 0.5, 1.0);
+	// Match PlayCanvas / TwinScape LOD debug palette.
+	if (Palette == 0u) return float3(1.0, 0.0, 0.0);
+	if (Palette == 1u) return float3(0.0, 1.0, 0.0);
+	if (Palette == 2u) return float3(0.0, 0.0, 1.0);
+	if (Palette == 3u) return float3(1.0, 1.0, 0.0);
+	if (Palette == 4u) return float3(1.0, 0.0, 1.0);
+	if (Palette == 5u) return float3(0.0, 1.0, 1.0);
+	if (Palette == 6u) return float3(1.0, 0.5, 0.0);
+	return float3(0.5, 0.0, 1.0);
+}
+
+/** Tint shaded radiance with LOD color while keeping original luminance/contrast. */
+float3 ApplyGaussianLodDebugTint(float3 ShadedRgb, uint LodLevel)
+{
+	const float3 Tint = GetGaussianLodDebugColor(LodLevel);
+	const float Luma = dot(ShadedRgb, float3(0.2126, 0.7152, 0.0722));
+	const float TintLuma = max(dot(Tint, float3(0.2126, 0.7152, 0.0722)), 1e-3);
+	return Tint * (Luma / TintLuma);
 }
 
 float3 EvaluateGaussianShRadiance(

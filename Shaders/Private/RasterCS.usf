@@ -133,6 +133,10 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 					GaussianClrOffset,
 					GaussianClrScaleRGB,
 					GaussianSaturation);
+				if (StreamingDebugRenderMode == 1u)
+				{
+					Color = ApplyGaussianLodDebugTint(Color, 0u);
+				}
 				if (Alpha < GaussianAlphaCutoff)
 				{
 					continue;
@@ -143,7 +147,7 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 				Alpha = EvaluateSplatAlphaEllipse(float2(X, Y) + 0.5, ScreenCenter, InvConic, EffectiveOpacity, GaussianCutoffK, bDebugOverlay, GaussianTransparencyMultiplier);
 				if (StreamingDebugRenderMode == 1u)
 				{
-					Color = GetGaussianLodDebugColor(0u);
+					Color = ApplyGaussianLodDebugTint(float3(0.65, 0.65, 0.65), 0u);
 				}
 				if (Alpha < GaussianAlphaCutoff)
 				{

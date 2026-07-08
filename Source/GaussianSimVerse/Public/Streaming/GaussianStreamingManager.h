@@ -18,12 +18,16 @@ class GAUSSIANSIMVERSE_API FGaussianStreamingManager
 public:
 	void Initialize(AGaussianStreamedSceneActor* InOwner, UGaussianStreamedSceneAsset* InAsset, UGaussianScene* InScene);
 	void Shutdown();
-	void UpdateStreaming(const FVector& ViewOrigin);
+	void UpdateStreaming(const FVector& ViewOrigin, const FVector& ViewDirection);
 
 	int32 GetLoadedChunkCount() const { return ResidentChunks.Num(); }
 	int32 GetLoadedSplatCount() const;
 	int32 GetPendingLoadCount() const { return PendingLoads.Num(); }
 	int32 GetDesiredChunkCount() const { return DesiredKeys.Num(); }
+	/** True while filling the first desired set; higher load concurrency for cold start. */
+	bool IsBootstrapActive() const { return bBootstrapActive; }
+	/** True while camera is actively moving/turning; prefer responsive LOD updates. */
+	bool IsCameraInMotion() const;
 
 private:
 	struct FResidentChunk
@@ -53,11 +57,21 @@ private:
 	void StartPendingLoads();
 	void ProcessCompletedLoads();
 	void EvictExcessChunks();
+	void UnloadSupersededChunks();
 	void RemoveResident(const FGaussianStreamChunkKey& Key, TArray<TObjectPtr<UGaussianAsset>>& OutAssetsPendingRelease);
 	void ReleaseDeferredAssets(const TArray<TObjectPtr<UGaussianAsset>>& Assets);
 	FString MakeChunkDirectoryForKey(const FGaussianStreamChunkKey& Key) const;
 	FGaussianBounds BoundsForKey(const FGaussianStreamChunkKey& Key) const;
 	FGaussianSogChunkLoader::FLoadRange RangeForKey(const FGaussianStreamChunkKey& Key) const;
+	bool ShouldResampleDesired(const FVector& ViewOrigin, const FVector& ViewDirection) const;
+	int32 GetMaxStartsPerUpdate() const;
+	int32 GetMaxCompletedLoadsPerUpdate() const;
+	void MaybeEndBootstrap();
+	int32 CountMissingDesiredChunks() const;
+	bool IsCameraInMotionInternal() const;
+	static bool IsSameSpatialSource(const FGaussianStreamChunkKey& A, const FGaussianStreamChunkKey& B);
+	bool HasResidentReplacementFor(const FGaussianStreamChunkKey& Key, const TSet<FGaussianStreamChunkKey>& Desired) const;
+	bool IsAwaitingLodReplacement(const FGaussianStreamChunkKey& Key, const TSet<FGaussianStreamChunkKey>& Desired) const;
 
 	AGaussianStreamedSceneActor* Owner = nullptr;
 	TObjectPtr<UGaussianStreamedSceneAsset> StreamedAsset;
@@ -66,4 +80,11 @@ private:
 	TMap<FGaussianStreamChunkKey, FResidentChunk> ResidentChunks;
 	TArray<FPendingLoad> PendingLoads;
 	TSet<FGaussianStreamChunkKey> DesiredKeys;
+	FVector LastSampledViewOrigin = FVector::ZeroVector;
+	FVector LastSampledViewDirection = FVector::ForwardVector;
+	bool bHasSampledViewOrigin = false;
+	bool bHasSampledViewDirection = false;
+	int32 LastResampleFrame = 0;
+	/** First fill prefers throughput; steady streaming prefers smoother FPS. */
+	bool bBootstrapActive = true;
 };

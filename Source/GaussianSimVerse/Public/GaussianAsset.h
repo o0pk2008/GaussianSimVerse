@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "GaussianTypes.h"
+#include "Rendering/GaussianGPUResources.h"
 #include "GaussianAsset.generated.h"
 
 class FGaussianGPUBuffer;
@@ -59,6 +60,18 @@ public:
 		const TArray<FGaussianSplatData>& InStagingData,
 		TArray<float>&& InShCoefficients,
 		int32 InImportedShDegree);
+
+	/**
+	 * Streamed commit path: staging already centered, GPU layout already converted on a worker.
+	 * Avoids ConvertSplatDataArray / BuildPositionBuffer on the game thread.
+	 */
+	void SetPreparedStreamingData(
+		TArray<FGaussianSplatData>&& InCenteredStaging,
+		TArray<float>&& InShCoefficients,
+		int32 InImportedShDegree,
+		const FGaussianBounds& InBounds,
+		TArray<FGaussianSplatGPU>&& InGpuSplats,
+		TArray<FVector4f>&& InPositions);
 
 	void SetSourceTextures(const TArray<class UTexture2D*>& InTextures);
 

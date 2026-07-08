@@ -54,11 +54,21 @@ void AGaussianStreamedSceneActor::PostRegisterAllComponents()
 	Super::PostRegisterAllComponents();
 	InitializeStreaming();
 	RefreshRenderRegistration();
+	ApplyStreamingCVarOverrides();
+	StreamingManager.UpdateStreaming(GetStreamingViewOrigin(), GetStreamingViewDirection());
 
 #if WITH_EDITOR
 	if (!EditorCameraMovedHandle.IsValid())
 	{
 		EditorCameraMovedHandle = FEditorDelegates::OnEditorCameraMoved.AddUObject(this, &AGaussianStreamedSceneActor::HandleEditorCameraMoved);
+	}
+	if (!EditorStreamingTickHandle.IsValid())
+	{
+		// Bootstrap: near every-frame commits; steady: slower idle ticks.
+		EditorStreamingTickInterval = 0.0f;
+		EditorStreamingTickHandle = FTSTicker::GetCoreTicker().AddTicker(
+			FTickerDelegate::CreateUObject(this, &AGaussianStreamedSceneActor::HandleEditorStreamingTick),
+			EditorStreamingTickInterval);
 	}
 #endif
 }
@@ -70,6 +80,11 @@ void AGaussianStreamedSceneActor::PostUnregisterAllComponents()
 	{
 		FEditorDelegates::OnEditorCameraMoved.Remove(EditorCameraMovedHandle);
 		EditorCameraMovedHandle.Reset();
+	}
+	if (EditorStreamingTickHandle.IsValid())
+	{
+		FTSTicker::GetCoreTicker().RemoveTicker(EditorStreamingTickHandle);
+		EditorStreamingTickHandle.Reset();
 	}
 #endif
 
@@ -84,12 +99,17 @@ void AGaussianStreamedSceneActor::SetStreamedSceneAsset(UGaussianStreamedSceneAs
 	SnapActorToSceneOrigin();
 	InitializeStreaming();
 	RefreshRenderRegistration();
+	ApplyStreamingCVarOverrides();
+	StreamingManager.UpdateStreaming(GetStreamingViewOrigin(), GetStreamingViewDirection());
 }
 
 void AGaussianStreamedSceneActor::NotifyStreamingChunkLoaded()
 {
-	TryRegisterScene();
-	RefreshRenderRegistration();
+	// Avoid RefreshRenderRegistration here: MarkSceneDirty already rebuilds proxies; re-initing triggers extra hitches.
+	if (GaussianScene && !GaussianScene->IsRegisteredWithRenderer())
+	{
+		TryRegisterScene();
+	}
 }
 
 void AGaussianStreamedSceneActor::DrawStreamingDebugOverlay(const FGaussianStreamingManager& Manager) const
@@ -106,7 +126,8 @@ void AGaussianStreamedSceneActor::DrawStreamingDebugOverlay(const FGaussianStrea
 		Manager.GetPendingLoadCount(),
 		Manager.GetLoadedSplatCount());
 
-	GEngine->AddOnScreenDebugMessage(INDEX_NONE, 0.0f, FColor::Cyan, Message);
+	const int32 MessageKey = static_cast<int32>(GetUniqueID());
+	GEngine->AddOnScreenDebugMessage(MessageKey, 0.2f, FColor::Cyan, Message);
 }
 
 void AGaussianStreamedSceneActor::SyncSceneSettings()
@@ -135,7 +156,19 @@ void AGaussianStreamedSceneActor::ApplyStreamingCVarOverrides() const
 	GaussianSimVerse::RenderSettings::CVarStreamingDebugDraw->Set(bStreamingDebugDraw ? 1 : 0, ECVF_SetByCode);
 	GaussianSimVerse::RenderSettings::CVarStreamingDebugOverlay->Set(bStreamingDebugOverlay ? 1 : 0, ECVF_SetByCode);
 	GaussianSimVerse::RenderSettings::CVarStreamingDebugRenderMode->Set(static_cast<int32>(DebugRenderMode), ECVF_SetByCode);
-	GaussianSimVerse::RenderSettings::CVarDebugOverlay->Set(DebugRenderMode == EGaussianStreamingDebugRenderMode::LOD ? 1 : 0, ECVF_SetByCode);
+}
+
+void AGaussianStreamedSceneActor::UpdateStreamingFromView()
+{
+	if (!GaussianSimVerse::RenderSettings::IsStreamingEnabled()
+		|| !StreamedSceneAsset
+		|| !GaussianScene
+		|| !ShouldRenderGaussian())
+	{
+		return;
+	}
+
+	StreamingManager.UpdateStreaming(GetStreamingViewOrigin(), GetStreamingViewDirection());
 }
 
 void AGaussianStreamedSceneActor::OnConstruction(const FTransform& Transform)
@@ -151,7 +184,12 @@ void AGaussianStreamedSceneActor::OnConstruction(const FTransform& Transform)
 	SyncSceneSettings();
 	ApplyStreamingCVarOverrides();
 	UpdateBoundsVisual();
-	InitializeStreaming();
+	// Do not InitializeStreaming here: property edits (including Debug Render) retrigger OnConstruction
+	// and would wipe resident chunks. Cold start / asset assign / BeginPlay handle init.
+	if (StreamedSceneAsset && StreamingManager.GetDesiredChunkCount() == 0 && StreamingManager.GetLoadedChunkCount() == 0)
+	{
+		InitializeStreaming();
+	}
 	RefreshRenderRegistration();
 }
 
@@ -159,7 +197,10 @@ void AGaussianStreamedSceneActor::BeginPlay()
 {
 	Super::BeginPlay();
 	ApplyStreamingCVarOverrides();
-	InitializeStreaming();
+	if (StreamedSceneAsset && StreamingManager.GetLoadedChunkCount() == 0)
+	{
+		InitializeStreaming();
+	}
 	RefreshRenderRegistration();
 }
 
@@ -173,17 +214,7 @@ void AGaussianStreamedSceneActor::EndPlay(const EEndPlayReason::Type EndPlayReas
 void AGaussianStreamedSceneActor::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
-
-	if (!GaussianSimVerse::RenderSettings::IsStreamingEnabled()
-		|| !StreamedSceneAsset
-		|| !GaussianScene
-		|| !ShouldRenderGaussian())
-	{
-		return;
-	}
-
-	ApplyStreamingCVarOverrides();
-	StreamingManager.UpdateStreaming(GetStreamingViewOrigin());
+	UpdateStreamingFromView();
 }
 
 void AGaussianStreamedSceneActor::BeginDestroy()
@@ -229,17 +260,39 @@ void AGaussianStreamedSceneActor::PostEditChangeProperty(FPropertyChangedEvent& 
 	{
 		RefreshRenderRegistration();
 	}
+	else if (PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, bStreamingDebugDraw)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, bStreamingDebugOverlay)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, DebugRenderMode))
+	{
+		// Debug toggles must not re-initialize streaming / reload resident chunks.
+		ApplyStreamingCVarOverrides();
+		if (bStreamingDebugOverlay)
+		{
+			DrawStreamingDebugOverlay(StreamingManager);
+		}
+		// Mark dirty so proxies pick up StreamingDebugRenderMode without dumping GPU/assets.
+		if (GaussianScene && GaussianScene->IsRegisteredWithRenderer())
+		{
+			FGaussianRenderer::Get().MarkSceneDirty(GaussianScene);
+		}
+	}
 	else if (PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, bApplyStreamingCVarOverrides)
 		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, bStreamingEnable)
 		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, StreamingLoadRadius)
 		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, StreamingLodBaseDistance)
 		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, StreamingMaxLoadedSplats)
-		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, StreamingMaxLoadsPerFrame)
-		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, bStreamingDebugDraw)
-		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, bStreamingDebugOverlay)
-		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, DebugRenderMode))
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, StreamingMaxLoadsPerFrame))
 	{
 		ApplyStreamingCVarOverrides();
+		if (bStreamingEnable)
+		{
+			UpdateStreamingFromView();
+		}
+		else
+		{
+			ShutdownStreaming();
+			RefreshRenderRegistration();
+		}
 	}
 	else if (PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, ShBandOverride)
 		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, Colors)
@@ -441,13 +494,75 @@ FVector AGaussianStreamedSceneActor::GetStreamingViewOrigin() const
 	return GetActorLocation();
 }
 
+FVector AGaussianStreamedSceneActor::GetStreamingViewDirection() const
+{
+	if (const UWorld* World = GetWorld())
+	{
+		if (const APlayerController* PC = World->GetFirstPlayerController())
+		{
+			FVector ViewLocation;
+			FRotator ViewRotation;
+			PC->GetPlayerViewPoint(ViewLocation, ViewRotation);
+			return ViewRotation.Vector();
+		}
+
 #if WITH_EDITOR
+		if (World->WorldType == EWorldType::Editor && GCurrentLevelEditingViewportClient)
+		{
+			return GCurrentLevelEditingViewportClient->GetViewRotation().Vector();
+		}
+#endif
+	}
+
+	return GetActorForwardVector();
+}
+
+#if WITH_EDITOR
+namespace
+{
+	constexpr float EditorStreamingIdleIntervalSeconds = 0.05f;
+	constexpr float EditorStreamingMotionIntervalSeconds = 0.016f;
+}
+
+void AGaussianStreamedSceneActor::EnsureEditorStreamingTickInterval()
+{
+	const float DesiredInterval = StreamingManager.IsBootstrapActive()
+		? 0.0f
+		: (StreamingManager.IsCameraInMotion() ? EditorStreamingMotionIntervalSeconds : EditorStreamingIdleIntervalSeconds);
+	if (FMath::IsNearlyEqual(EditorStreamingTickInterval, DesiredInterval)
+		&& EditorStreamingTickHandle.IsValid())
+	{
+		return;
+	}
+
+	if (EditorStreamingTickHandle.IsValid())
+	{
+		FTSTicker::GetCoreTicker().RemoveTicker(EditorStreamingTickHandle);
+		EditorStreamingTickHandle.Reset();
+	}
+
+	EditorStreamingTickInterval = DesiredInterval;
+	EditorStreamingTickHandle = FTSTicker::GetCoreTicker().AddTicker(
+		FTickerDelegate::CreateUObject(this, &AGaussianStreamedSceneActor::HandleEditorStreamingTick),
+		EditorStreamingTickInterval);
+}
+
 void AGaussianStreamedSceneActor::HandleEditorCameraMoved(
 	const FVector& Location,
 	const FRotator& Rotation,
 	ELevelViewportType ViewportType,
 	int32 ViewIndex)
 {
+	const double NowSeconds = FPlatformTime::Seconds();
+	const double MinInterval = StreamingManager.IsBootstrapActive()
+		? 0.0
+		: static_cast<double>(StreamingManager.IsCameraInMotion() ? EditorStreamingMotionIntervalSeconds : EditorStreamingIdleIntervalSeconds);
+	if ((NowSeconds - LastEditorStreamingUpdateSeconds) < MinInterval)
+	{
+		return;
+	}
+	LastEditorStreamingUpdateSeconds = NowSeconds;
+
 	if (!GaussianSimVerse::RenderSettings::IsStreamingEnabled()
 		|| !StreamedSceneAsset
 		|| !GaussianScene
@@ -456,6 +571,20 @@ void AGaussianStreamedSceneActor::HandleEditorCameraMoved(
 		return;
 	}
 
-	StreamingManager.UpdateStreaming(Location);
+	StreamingManager.UpdateStreaming(Location, Rotation.Vector());
+	EnsureEditorStreamingTickInterval();
+}
+
+bool AGaussianStreamedSceneActor::HandleEditorStreamingTick(float DeltaTime)
+{
+	if (!IsValid(this))
+	{
+		return false;
+	}
+
+	LastEditorStreamingUpdateSeconds = FPlatformTime::Seconds();
+	UpdateStreamingFromView();
+	EnsureEditorStreamingTickInterval();
+	return true;
 }
 #endif

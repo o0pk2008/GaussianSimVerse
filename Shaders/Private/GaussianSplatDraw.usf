@@ -184,7 +184,7 @@ void MainVS(
 	if (bDebugOverlay != 0u)
 	{
 		Output.Color = (StreamingDebugRenderMode == 1u)
-			? GetGaussianLodDebugColor(LocalLodLevel)
+			? ApplyGaussianLodDebugTint(float3(0.65, 0.65, 0.65), LocalLodLevel)
 			: float3(1.0, 0.1, 0.8);
 		return;
 	}
@@ -204,6 +204,10 @@ void MainVS(
 		LocalClrOffset,
 		LocalClrScaleRGB,
 		LocalSaturation);
+	if (StreamingDebugRenderMode == 1u)
+	{
+		Output.Color = ApplyGaussianLodDebugTint(Output.Color, LocalLodLevel);
+	}
 }
 
 float4 MainPS(FGaussianSplatVSToPS Input) : SV_Target0

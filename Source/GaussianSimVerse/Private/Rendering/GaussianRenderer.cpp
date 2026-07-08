@@ -142,8 +142,8 @@ void FGaussianRenderer::RegisterScene(UGaussianScene* Scene)
 		}
 	}
 
+	// Async proxy upload — FlushRenderingCommands here stalls the game thread on every stream in.
 	RebuildSceneProxies_GameThread();
-	FlushRenderingCommands();
 }
 
 void FGaussianRenderer::UnregisterScene(UGaussianScene* Scene)
@@ -165,14 +165,13 @@ void FGaussianRenderer::UnregisterScene(UGaussianScene* Scene)
 	RebuildSceneProxies_GameThread();
 }
 
-void FGaussianRenderer::MarkSceneDirty(UGaussianScene* Scene)
+void FGaussianRenderer::MarkSceneDirty(UGaussianScene* Scene, bool bFlushImmediately)
 {
 	if (!Scene)
 	{
 		return;
 	}
 
-	bool bNeedsRebuild = false;
 	{
 		FScopeLock Lock(&SceneLock);
 		for (FRegisteredScene& Entry : RegisteredScenes)
@@ -181,16 +180,28 @@ void FGaussianRenderer::MarkSceneDirty(UGaussianScene* Scene)
 			{
 				Entry.bDirty = true;
 				bProxiesDirty = true;
-				bNeedsRebuild = true;
 				break;
 			}
 		}
 	}
 
+	if (bFlushImmediately)
+	{
+		FlushDirtySceneProxies();
+	}
+}
+
+void FGaussianRenderer::FlushDirtySceneProxies()
+{
+	bool bNeedsRebuild = false;
+	{
+		FScopeLock Lock(&SceneLock);
+		bNeedsRebuild = bProxiesDirty;
+	}
+
 	if (bNeedsRebuild)
 	{
 		RebuildSceneProxies_GameThread();
-		FlushRenderingCommands();
 	}
 }
 

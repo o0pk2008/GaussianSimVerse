@@ -64,7 +64,7 @@ namespace GaussianLodMetaPrivate
 		return OutSlices.Num() > 0;
 	}
 
-	static bool ParseNode(const TSharedPtr<FJsonObject>& NodeObject, FGaussianLodTreeNode& OutNode)
+	static bool ParseNode(const TSharedPtr<FJsonObject>& NodeObject, FGaussianLodTreeNode& OutNode, int32& InOutNextLeafId)
 	{
 		const TSharedPtr<FJsonObject>* BoundObject = nullptr;
 		if (!NodeObject->TryGetObjectField(TEXT("bound"), BoundObject) || !BoundObject)
@@ -95,11 +95,16 @@ namespace GaussianLodMetaPrivate
 				}
 
 				FGaussianLodTreeNode ChildNode;
-				if (ParseNode(*ChildObject, ChildNode))
+				if (ParseNode(*ChildObject, ChildNode, InOutNextLeafId))
 				{
 					OutNode.Children.Add(MoveTemp(ChildNode));
 				}
 			}
+		}
+
+		if (OutNode.IsLeaf())
+		{
+			OutNode.LeafId = InOutNextLeafId++;
 		}
 
 		return OutNode.IsLeaf() || OutNode.Children.Num() > 0;
@@ -143,7 +148,8 @@ bool FGaussianLodMetaReader::ParseFile(const FString& LodMetaPath, FGaussianLodM
 		return false;
 	}
 
-	if (!GaussianLodMetaPrivate::ParseNode(*TreeObject, OutTree))
+	int32 NextLeafId = 0;
+	if (!GaussianLodMetaPrivate::ParseNode(*TreeObject, OutTree, NextLeafId))
 	{
 		OutError = TEXT("lod-meta.json tree parse failed");
 		return false;

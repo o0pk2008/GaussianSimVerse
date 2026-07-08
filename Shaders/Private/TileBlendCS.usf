@@ -157,12 +157,17 @@ bool BlendTileSplat(
 			BindingParams.ClrOffset,
 			BindingParams.ClrScaleRGB,
 			BindingParams.Saturation);
+		if (StreamingDebugRenderMode == 1u)
+		{
+			const uint LodLevel = (uint)max(0.0, round(BindingParams.LodLevel));
+			Color = ApplyGaussianLodDebugTint(Color, LodLevel);
+		}
 	}
 	else
 	{
 		const uint LodLevel = (uint)max(0.0, round(BindingParams.LodLevel));
 		Color = (StreamingDebugRenderMode == 1u)
-			? GetGaussianLodDebugColor(LodLevel)
+			? ApplyGaussianLodDebugTint(float3(0.65, 0.65, 0.65), LodLevel)
 			: float3(1.0, 0.1, 0.8);
 	}
 

@@ -29,7 +29,10 @@ public:
 	// Game thread
 	void RegisterScene(UGaussianScene* Scene);
 	void UnregisterScene(UGaussianScene* Scene);
-	void MarkSceneDirty(UGaussianScene* Scene);
+	/** Mark a scene dirty. By default rebuilds proxies immediately; pass false to coalesce then FlushDirtySceneProxies. */
+	void MarkSceneDirty(UGaussianScene* Scene, bool bFlushImmediately = true);
+	/** Rebuild proxies once if any deferred MarkSceneDirty calls are pending. */
+	void FlushDirtySceneProxies();
 
 	// Render thread
 	void SyncSceneProxies_RenderThread();

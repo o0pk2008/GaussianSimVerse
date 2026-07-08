@@ -219,6 +219,38 @@ void UGaussianAsset::SetStagingData(
 	}
 }
 
+void UGaussianAsset::SetPreparedStreamingData(
+	TArray<FGaussianSplatData>&& InCenteredStaging,
+	TArray<float>&& InShCoefficients,
+	int32 InImportedShDegree,
+	const FGaussianBounds& InBounds,
+	TArray<FGaussianSplatGPU>&& InGpuSplats,
+	TArray<FVector4f>&& InPositions)
+{
+	Bounds = InBounds;
+	ImportedShDegree = FMath::Clamp(InImportedShDegree, 0, 3);
+
+	EncodeStagingToBulk(InCenteredStaging);
+	EncodeShCoefficientsToBulk(InShCoefficients);
+	GaussianCount = InCenteredStaging.Num();
+
+	StagingCache = MoveTemp(InCenteredStaging);
+	bStagingCacheLoaded = true;
+	ShCoefficientCache = InShCoefficients;
+	bShCoefficientCacheLoaded = true;
+
+	if (!GPUBuffer.IsValid())
+	{
+		GPUBuffer = MakeShared<FGaussianGPUBuffer, ESPMode::ThreadSafe>();
+	}
+
+	GPUBuffer->SetCPUDataPrepared(
+		MoveTemp(InGpuSplats),
+		MoveTemp(InPositions),
+		MoveTemp(InShCoefficients),
+		ImportedShDegree);
+}
+
 void UGaussianAsset::SetSourceTextures(const TArray<UTexture2D*>& InTextures)
 {
 	SourceTextures.Reset();

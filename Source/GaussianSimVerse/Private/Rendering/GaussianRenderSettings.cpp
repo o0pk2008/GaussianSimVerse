@@ -249,7 +249,7 @@ namespace GaussianSimVerse::RenderSettings
 
 	TAutoConsoleVariable<int32> CVarStreamingMaxLoadsPerFrame(
 		TEXT("r.GaussianSimVerse.Streaming.MaxLoadsPerFrame"),
-		2,
+		8,
 		TEXT("Maximum async chunk loads started per frame."),
 		ECVF_Default);
 

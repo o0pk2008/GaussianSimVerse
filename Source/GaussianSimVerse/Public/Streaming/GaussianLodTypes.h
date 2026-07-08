@@ -37,6 +37,9 @@ struct GAUSSIANSIMVERSE_API FGaussianLodTreeNode
 	UPROPERTY()
 	TArray<FGaussianLodSlice> LodSlices;
 
+	/** Assigned once at lod-meta parse time; stable across frames for LOD sibling matching. */
+	int32 LeafId = INDEX_NONE;
+
 	/** Recursive children are not UPROPERTY (UHT does not support struct recursion). */
 	TArray<FGaussianLodTreeNode> Children;
 
@@ -83,6 +86,10 @@ struct GAUSSIANSIMVERSE_API FGaussianStreamChunkKey
 	UPROPERTY()
 	int32 LodLevel = 0;
 
+	/** Stable id of the octree leaf this slice belongs to (links LOD siblings). */
+	UPROPERTY()
+	int32 LeafId = INDEX_NONE;
+
 	UPROPERTY()
 	bool bEnvironment = false;
 
@@ -94,14 +101,16 @@ struct GAUSSIANSIMVERSE_API FGaussianStreamChunkKey
 		return Key;
 	}
 
-	static FGaussianStreamChunkKey MakeSlice(int32 InFileIndex, int32 InOffset, int32 InCount, int32 InLodLevel)
+	static FGaussianStreamChunkKey MakeSlice(int32 InFileIndex, int32 InOffset, int32 InCount, int32 InLodLevel, int32 InLeafId)
 	{
 		FGaussianStreamChunkKey Key;
 		Key.FileIndex = InFileIndex;
 		Key.Offset = InOffset;
 		Key.Count = InCount;
 		Key.LodLevel = InLodLevel;
-		Key.KeyString = FString::Printf(TEXT("%d_%d_%d_%d"), InFileIndex, InOffset, InCount, InLodLevel);
+		Key.LeafId = InLeafId;
+		// Include LeafId so LOD siblings share a spatial identity while remaining unique keys.
+		Key.KeyString = FString::Printf(TEXT("L%d_%d_%d_%d_%d"), InLeafId, InFileIndex, InOffset, InCount, InLodLevel);
 		return Key;
 	}
 

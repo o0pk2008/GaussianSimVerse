@@ -66,6 +66,12 @@ public:
 		const TArray<FGaussianSplatData>& StagingData,
 		const TArray<float>& ShCoefficients,
 		int32 InImportedShDegree);
+	/** Attach already-converted GPU layout (prefer for streamed async prepare). */
+	void SetCPUDataPrepared(
+		TArray<FGaussianSplatGPU>&& InSplatData,
+		TArray<FVector4f>&& InPositions,
+		TArray<float>&& InShCoefficients,
+		int32 InImportedShDegree);
 	void MarkDirty();
 
 	uint32 GetNumGaussians() const { return NumGaussians; }
@@ -89,6 +95,7 @@ private:
 	TArray<float> ShCoefficientCPUData;
 	uint32 NumGaussians = 0;
 	uint32 ImportedShDegree = 0;
+	uint32 bHasShCpuData = 0;
 	bool bDirty = true;
 
 	TRefCountPtr<FRDGPooledBuffer> SplatPooledBuffer;
