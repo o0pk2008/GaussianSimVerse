@@ -122,11 +122,13 @@ void AGaussianStreamedSceneActor::DrawStreamingDebugOverlay(const FGaussianStrea
 	}
 
 	const FString Message = FString::Printf(
-		TEXT("Gaussian Streaming | LoadedChunks=%d Desired=%d Pending=%d Splats=%d"),
+		TEXT("Gaussian Streaming | Chunks=%d Desired=%d Pending=%d Splats=%d | Motion=%s Bootstrap=%s"),
 		Manager.GetLoadedChunkCount(),
 		Manager.GetDesiredChunkCount(),
 		Manager.GetPendingLoadCount(),
-		Manager.GetLoadedSplatCount());
+		Manager.GetLoadedSplatCount(),
+		Manager.IsCameraInMotion() ? TEXT("Y") : TEXT("N"),
+		Manager.IsBootstrapActive() ? TEXT("Y") : TEXT("N"));
 
 	const int32 MessageKey = static_cast<int32>(GetUniqueID());
 	GEngine->AddOnScreenDebugMessage(MessageKey, 0.2f, FColor::Cyan, Message);
@@ -155,6 +157,9 @@ void AGaussianStreamedSceneActor::ApplyStreamingCVarOverrides() const
 	GaussianSimVerse::RenderSettings::CVarStreamingLodBaseDistance->Set(StreamingLodBaseDistance, ECVF_SetByCode);
 	GaussianSimVerse::RenderSettings::CVarStreamingMaxLoadedSplats->Set(StreamingMaxLoadedSplats, ECVF_SetByCode);
 	GaussianSimVerse::RenderSettings::CVarStreamingMaxLoadsPerFrame->Set(StreamingMaxLoadsPerFrame, ECVF_SetByCode);
+	GaussianSimVerse::RenderSettings::CVarStreamingMaxCommitSplatsPerFrame->Set(StreamingMaxCommitSplatsPerFrame, ECVF_SetByCode);
+	GaussianSimVerse::RenderSettings::CVarStreamingMotionLodBias->Set(StreamingMotionLodBias, ECVF_SetByCode);
+	GaussianSimVerse::RenderSettings::CVarStreamingLodUnderfillLimit->Set(StreamingLodUnderfillLimit, ECVF_SetByCode);
 	GaussianSimVerse::RenderSettings::CVarStreamingDebugDraw->Set(bStreamingDebugDraw ? 1 : 0, ECVF_SetByCode);
 	GaussianSimVerse::RenderSettings::CVarStreamingDebugOverlay->Set(bStreamingDebugOverlay ? 1 : 0, ECVF_SetByCode);
 	GaussianSimVerse::RenderSettings::CVarStreamingDebugRenderMode->Set(static_cast<int32>(DebugRenderMode), ECVF_SetByCode);
@@ -271,7 +276,10 @@ void AGaussianStreamedSceneActor::PostEditChangeProperty(FPropertyChangedEvent& 
 		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, StreamingLoadRadius)
 		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, StreamingLodBaseDistance)
 		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, StreamingMaxLoadedSplats)
-		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, StreamingMaxLoadsPerFrame))
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, StreamingMaxLoadsPerFrame)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, StreamingMaxCommitSplatsPerFrame)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, StreamingMotionLodBias)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, StreamingLodUnderfillLimit))
 	{
 		ApplyStreamingCVarOverrides();
 		if (bStreamingEnable)

@@ -42,6 +42,9 @@ namespace GaussianSimVerse::RenderSettings
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<float> CVarStreamingLodMultiplier;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarStreamingMaxLoadedSplats;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarStreamingMaxLoadsPerFrame;
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarStreamingMaxCommitSplatsPerFrame;
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarStreamingMotionLodBias;
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarStreamingLodUnderfillLimit;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarStreamingDebugDraw;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarStreamingDebugOverlay;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarStreamingDebugRenderMode;
@@ -271,6 +274,30 @@ namespace GaussianSimVerse::RenderSettings
 	FORCEINLINE int32 GetStreamingMaxLoadsPerFrame()
 	{
 		return FMath::Clamp(CVarStreamingMaxLoadsPerFrame.GetValueOnAnyThread(), 1, 16);
+	}
+
+	/**
+	 * Soft budget for splat count committed to the scene on the game thread per update.
+	 * 0 = unlimited (chunk-count limit only). Always allows at least one finished chunk so progress continues.
+	 */
+	FORCEINLINE int32 GetStreamingMaxCommitSplatsPerFrame()
+	{
+		return FMath::Max(0, CVarStreamingMaxCommitSplatsPerFrame.GetValueOnAnyThread());
+	}
+
+	/** Extra LOD levels (coarser) applied while the camera is actively moving, for smoother motion. */
+	FORCEINLINE int32 GetStreamingMotionLodBias()
+	{
+		return FMath::Clamp(CVarStreamingMotionLodBias.GetValueOnAnyThread(), 0, 8);
+	}
+
+	/**
+	 * Max coarser LOD steps allowed when the optimal level is not resident yet (PlayCanvas-style underfill).
+	 * 0 = always request optimal; higher = show/load coarser first, then promote step-by-step.
+	 */
+	FORCEINLINE int32 GetStreamingLodUnderfillLimit()
+	{
+		return FMath::Clamp(CVarStreamingLodUnderfillLimit.GetValueOnAnyThread(), 0, 8);
 	}
 
 	FORCEINLINE bool IsStreamingDebugEnabled()

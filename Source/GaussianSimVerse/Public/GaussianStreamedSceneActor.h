@@ -66,10 +66,28 @@ public:
 	float StreamingLodBaseDistance = 1.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Streaming|CVar Overrides", meta = (DisplayName = "Max Loaded Splats", ClampMin = "0", UIMin = "0", EditCondition = "bApplyStreamingCVarOverrides"))
-	int32 StreamingMaxLoadedSplats = 4000000;
+	int32 StreamingMaxLoadedSplats = 2000000;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Streaming|CVar Overrides", meta = (DisplayName = "Max Loads Per Frame", ClampMin = "1", ClampMax = "16", UIMin = "1", UIMax = "16", EditCondition = "bApplyStreamingCVarOverrides"))
 	int32 StreamingMaxLoadsPerFrame = 8;
+
+	/**
+	 * Soft budget for splats committed per update (smooths LOD-switch hitches).
+	 * 0 = unlimited. Always commits at least one finished chunk.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Streaming|CVar Overrides", meta = (DisplayName = "Max Commit Splats Per Frame", ClampMin = "0", UIMin = "0", EditCondition = "bApplyStreamingCVarOverrides"))
+	int32 StreamingMaxCommitSplatsPerFrame = 400000;
+
+	/** Extra coarser LOD levels while the camera is moving (0 = off). Detail recovers after settle. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Streaming|CVar Overrides", meta = (DisplayName = "Motion LOD Bias", ClampMin = "0", ClampMax = "8", UIMin = "0", UIMax = "8", EditCondition = "bApplyStreamingCVarOverrides"))
+	int32 StreamingMotionLodBias = 1;
+
+	/**
+	 * PlayCanvas-style underfill: max coarser LOD steps when optimal is not resident.
+	 * 0 = always request optimal; higher = show/load coarser first, then promote one level at a time.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Streaming|CVar Overrides", meta = (DisplayName = "LOD Underfill Limit", ClampMin = "0", ClampMax = "8", UIMin = "0", UIMax = "8", EditCondition = "bApplyStreamingCVarOverrides"))
+	int32 StreamingLodUnderfillLimit = 2;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Streaming|CVar Overrides", meta = (DisplayName = "Debug Draw Octree", EditCondition = "bApplyStreamingCVarOverrides"))
 	bool bStreamingDebugDraw = false;

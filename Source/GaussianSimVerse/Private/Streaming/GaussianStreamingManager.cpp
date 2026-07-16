@@ -19,20 +19,25 @@
 namespace
 {
 	// Keep recently-undesired chunks briefly when nothing will replace them (left load radius).
-	// Same-source LOD upgrades keep the old slice until the new one is resident (no holes).
+	// Same-source LOD siblings are never co-resident once a replacement is committed (atomic swap).
 	constexpr int32 StreamingUnloadGraceFrames = 12;
 	constexpr int32 StreamingUnloadGraceFramesMotion = 8;
-	// Motion: few commits/frame to avoid GT/upload spikes; idle/bootstrap can catch up.
-	constexpr int32 MaxCompletedLoadsPerUpdateSteady = 4;
-	constexpr int32 MaxCompletedLoadsPerUpdateBootstrap = 8;
-	constexpr int32 MaxStartsPerUpdateBootstrap = 12;
-	constexpr int32 MaxCompletedLoadsPerUpdateIdle = 4;
-	constexpr int32 MaxStartsPerUpdateMotion = 8;
-	constexpr int32 MaxStartsPerUpdateIdleExtra = 4;
+	// Motion: low commit throughput (smooth FPS). Idle: moderate (avoid RAM spikes / long thrash).
+	constexpr int32 MaxCompletedLoadsPerUpdateMotion = 1;
+	constexpr int32 MaxCompletedLoadsPerUpdateBootstrap = 4;
+	constexpr int32 MaxStartsPerUpdateBootstrap = 6;
+	constexpr int32 MaxCompletedLoadsPerUpdateIdle = 2;
+	constexpr int32 MaxStartsPerUpdateMotion = 3;
+	constexpr int32 MaxStartsPerUpdateCatchUp = 4;
+	constexpr int32 MaxStartsPerUpdateIdleExtra = 2;
 	constexpr int32 MaxCompletedLoadsPerUpdateCatchUp = 3;
-	constexpr int32 StreamingMotionWindowFrames = 12;
-	constexpr float StreamingViewResampleDistanceCm = 10.0f;
-	constexpr float StreamingViewResampleAngleDeg = 1.0f;
+	// After camera stops, wait a bit before promoting detail (reduces continuous LOD thrash).
+	constexpr int32 StreamingMotionWindowFrames = 10;
+	constexpr float StreamingViewResampleDistanceCm = 25.0f;
+	constexpr float StreamingViewResampleAngleDeg = 2.0f;
+	// One step at a time — multi-step prefetch flooded memory (OOM in SetPreparedStreamingData).
+	constexpr int32 PrefetchDepthMotion = 1;
+	constexpr int32 PrefetchDepthIdle = 1;
 
 	FGaussianBounds ComputeCenteredBounds(const TArray<FGaussianSplatData>& Splats)
 	{
@@ -70,7 +75,15 @@ namespace
 
 		GaussianGPU::ConvertSplatDataArray(Result.Splats, Result.PreparedGpuSplats);
 		GaussianGPU::BuildPositionBuffer(Result.PreparedGpuSplats, Result.PreparedPositions);
+
+		// Free CPU staging as soon as GPU layout exists — pending queues can hold many results.
+		Result.Splats.Empty();
 	}
+
+	/** Hard caps to prevent page-file OOM when idle catch-up queues many multi-MB chunks. */
+	constexpr int32 MaxConcurrentStartedLoads = 3;
+	constexpr int32 MaxPendingLoadSlots = 12;
+	constexpr int32 MaxFinishedPendingResults = 3;
 }
 
 void FGaussianStreamingManager::Initialize(
@@ -84,11 +97,13 @@ void FGaussianStreamingManager::Initialize(
 	ResidentChunks.Reset();
 	PendingLoads.Reset();
 	DesiredKeys.Reset();
+	PrefetchKeys.Reset();
 	LastSampledViewOrigin = FVector::ZeroVector;
 	LastSampledViewDirection = FVector::ForwardVector;
 	bHasSampledViewOrigin = false;
 	bHasSampledViewDirection = false;
 	LastResampleFrame = 0;
+	bWasCameraInMotion = false;
 	bBootstrapActive = true;
 
 	if (StreamedAsset)
@@ -122,11 +137,13 @@ void FGaussianStreamingManager::Shutdown()
 	ResidentChunks.Reset();
 	PendingLoads.Reset();
 	DesiredKeys.Reset();
+	PrefetchKeys.Reset();
 	LastSampledViewOrigin = FVector::ZeroVector;
 	LastSampledViewDirection = FVector::ForwardVector;
 	bHasSampledViewOrigin = false;
 	bHasSampledViewDirection = false;
 	LastResampleFrame = 0;
+	bWasCameraInMotion = false;
 	bBootstrapActive = true;
 
 	if (Scene && Scene->IsRegisteredWithRenderer())
@@ -185,11 +202,176 @@ int32 FGaussianStreamingManager::SelectLodLevel(const FGaussianLodTreeNode& Node
 	return FMath::Clamp(LodLevel, 0, StreamedAsset->LodMeta.LodLevels - 1);
 }
 
+bool FGaussianStreamingManager::IsSliceResident(const FGaussianLodSlice& Slice, int32 LeafId) const
+{
+	if (Slice.Count <= 0)
+	{
+		return false;
+	}
+
+	const FGaussianStreamChunkKey Key = FGaussianStreamChunkKey::MakeSlice(
+		Slice.FileIndex,
+		Slice.Offset,
+		Slice.Count,
+		Slice.LodLevel,
+		LeafId);
+	return ResidentChunks.Contains(Key);
+}
+
+void FGaussianStreamingManager::SelectLeafDesiredAndPrefetch(
+	const FGaussianLodTreeNode& Node,
+	int32 OptimalLod,
+	int32 UnderfillLimit,
+	bool bPreferFastPromote,
+	int32 PrefetchDepth,
+	TSet<FGaussianStreamChunkKey>& OutDesired,
+	TSet<FGaussianStreamChunkKey>& OutPrefetch) const
+{
+	if (Node.LodSlices.Num() == 0 || !StreamedAsset)
+	{
+		return;
+	}
+
+	const int32 MaxLod = StreamedAsset->LodMeta.LodLevels - 1;
+	const int32 ClampedOptimal = FMath::Clamp(OptimalLod, 0, MaxLod);
+	const int32 Underfill = FMath::Max(UnderfillLimit, 0);
+	const int32 CoarseCap = FMath::Min(MaxLod, ClampedOptimal + Underfill);
+
+	// Index valid slices by LOD level (a leaf may skip some levels).
+	TMap<int32, const FGaussianLodSlice*> SlicesByLod;
+	for (const FGaussianLodSlice& Candidate : Node.LodSlices)
+	{
+		if (Candidate.Count <= 0 || !StreamedAsset->LodMeta.Filenames.IsValidIndex(Candidate.FileIndex))
+		{
+			continue;
+		}
+		// Prefer first occurrence if duplicates exist.
+		if (!SlicesByLod.Contains(Candidate.LodLevel))
+		{
+			SlicesByLod.Add(Candidate.LodLevel, &Candidate);
+		}
+	}
+
+	if (SlicesByLod.Num() == 0)
+	{
+		return;
+	}
+
+	const FGaussianLodSlice* DisplaySlice = nullptr;
+
+	if (Underfill > 0)
+	{
+		// Prefer highest quality already-resident within [optimal, optimal+underfill].
+		for (int32 Lod = ClampedOptimal; Lod <= CoarseCap; ++Lod)
+		{
+			if (const FGaussianLodSlice* const* Found = SlicesByLod.Find(Lod))
+			{
+				if (IsSliceResident(**Found, Node.LeafId))
+				{
+					DisplaySlice = *Found;
+					break;
+				}
+			}
+		}
+
+		// Nothing resident yet:
+		// - Motion: coarsest-in-range first (cheap paint, SuperSplat-like underfill).
+		// - Idle/fast promote: target optimal (or nearest) so detail converges like SuperSplat viewer.
+		if (!DisplaySlice)
+		{
+			if (bPreferFastPromote)
+			{
+				int32 BestDelta = MAX_int32;
+				for (int32 Lod = ClampedOptimal; Lod <= CoarseCap; ++Lod)
+				{
+					if (const FGaussianLodSlice* const* Found = SlicesByLod.Find(Lod))
+					{
+						const int32 Delta = FMath::Abs(Lod - ClampedOptimal);
+						if (Delta < BestDelta)
+						{
+							DisplaySlice = *Found;
+							BestDelta = Delta;
+						}
+					}
+				}
+			}
+			else
+			{
+				for (int32 Lod = CoarseCap; Lod >= ClampedOptimal; --Lod)
+				{
+					if (const FGaussianLodSlice* const* Found = SlicesByLod.Find(Lod))
+					{
+						DisplaySlice = *Found;
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	// Fallback: nearest available level to optimal (legacy / underfill disabled).
+	if (!DisplaySlice)
+	{
+		int32 BestDelta = MAX_int32;
+		for (const TPair<int32, const FGaussianLodSlice*>& Pair : SlicesByLod)
+		{
+			const int32 Delta = FMath::Abs(Pair.Key - ClampedOptimal);
+			// Strict '<' keeps the higher-detail (lower) level on ties.
+			if (Delta < BestDelta)
+			{
+				DisplaySlice = Pair.Value;
+				BestDelta = Delta;
+			}
+		}
+	}
+
+	if (!DisplaySlice)
+	{
+		return;
+	}
+
+	const FGaussianStreamChunkKey DisplayKey = FGaussianStreamChunkKey::MakeSlice(
+		DisplaySlice->FileIndex,
+		DisplaySlice->Offset,
+		DisplaySlice->Count,
+		DisplaySlice->LodLevel,
+		Node.LeafId);
+	OutDesired.Add(DisplayKey);
+
+	// Progressive prefetch toward optimal (depth 1 in motion, deeper when idle for faster catch-up).
+	const int32 Depth = FMath::Max(PrefetchDepth, 1);
+	if (DisplaySlice->LodLevel > ClampedOptimal)
+	{
+		int32 Prefetched = 0;
+		for (int32 Lod = DisplaySlice->LodLevel - 1; Lod >= ClampedOptimal && Prefetched < Depth; --Lod)
+		{
+			if (const FGaussianLodSlice* const* Found = SlicesByLod.Find(Lod))
+			{
+				const FGaussianStreamChunkKey PrefetchKey = FGaussianStreamChunkKey::MakeSlice(
+					(*Found)->FileIndex,
+					(*Found)->Offset,
+					(*Found)->Count,
+					(*Found)->LodLevel,
+					Node.LeafId);
+				if (PrefetchKey != DisplayKey && !ResidentChunks.Contains(PrefetchKey))
+				{
+					OutPrefetch.Add(PrefetchKey);
+					++Prefetched;
+				}
+			}
+		}
+	}
+}
+
 void FGaussianStreamingManager::TraverseNode(
 	const FGaussianLodTreeNode& Node,
 	const FVector& ViewOrigin,
 	int32 LodBias,
-	TSet<FGaussianStreamChunkKey>& OutDesired) const
+	int32 UnderfillLimit,
+	bool bPreferFastPromote,
+	int32 PrefetchDepth,
+	TSet<FGaussianStreamChunkKey>& OutDesired,
+	TSet<FGaussianStreamChunkKey>& OutPrefetch) const
 {
 	if (!IsNodeRelevant(Node.Bounds, ViewOrigin))
 	{
@@ -203,46 +385,21 @@ void FGaussianStreamingManager::TraverseNode(
 			return;
 		}
 
-		const int32 DesiredLod = SelectLodLevel(Node, ViewOrigin, LodBias);
-
-		// A leaf may not publish every LOD level (common for object datasets, where a block
-		// only exists at a subset of levels). Snap to the nearest available slice instead of
-		// dropping the block entirely, which previously made blocks vanish at some distances/angles.
-		const FGaussianLodSlice* Best = nullptr;
-		int32 BestDelta = MAX_int32;
-		for (const FGaussianLodSlice& Candidate : Node.LodSlices)
-		{
-			if (Candidate.Count <= 0 || !StreamedAsset->LodMeta.Filenames.IsValidIndex(Candidate.FileIndex))
-			{
-				continue;
-			}
-
-			const int32 Delta = FMath::Abs(Candidate.LodLevel - DesiredLod);
-			// Slices are sorted ascending by level; strict '<' keeps the higher-detail (lower) level on ties.
-			if (Delta < BestDelta)
-			{
-				Best = &Candidate;
-				BestDelta = Delta;
-			}
-		}
-
-		if (!Best)
-		{
-			return;
-		}
-
-		OutDesired.Add(FGaussianStreamChunkKey::MakeSlice(
-			Best->FileIndex,
-			Best->Offset,
-			Best->Count,
-			Best->LodLevel,
-			Node.LeafId));
+		const int32 OptimalLod = SelectLodLevel(Node, ViewOrigin, LodBias);
+		SelectLeafDesiredAndPrefetch(
+			Node,
+			OptimalLod,
+			UnderfillLimit,
+			bPreferFastPromote,
+			PrefetchDepth,
+			OutDesired,
+			OutPrefetch);
 		return;
 	}
 
 	for (const FGaussianLodTreeNode& Child : Node.Children)
 	{
-		TraverseNode(Child, ViewOrigin, LodBias, OutDesired);
+		TraverseNode(Child, ViewOrigin, LodBias, UnderfillLimit, bPreferFastPromote, PrefetchDepth, OutDesired, OutPrefetch);
 	}
 }
 
@@ -259,9 +416,13 @@ int64 FGaussianStreamingManager::SumDesiredSplatCount(const TSet<FGaussianStream
 	return Total;
 }
 
-void FGaussianStreamingManager::GatherDesiredChunks(const FVector& ViewOrigin, TSet<FGaussianStreamChunkKey>& OutDesired)
+void FGaussianStreamingManager::GatherDesiredChunks(
+	const FVector& ViewOrigin,
+	TSet<FGaussianStreamChunkKey>& OutDesired,
+	TSet<FGaussianStreamChunkKey>& OutPrefetch)
 {
 	OutDesired.Reset();
+	OutPrefetch.Reset();
 	if (!StreamedAsset)
 	{
 		return;
@@ -270,18 +431,42 @@ void FGaussianStreamingManager::GatherDesiredChunks(const FVector& ViewOrigin, T
 	const bool bHasEnvironment = !StreamedAsset->LodMeta.EnvironmentRelativePath.IsEmpty();
 	const int32 MaxSplats = GaussianSimVerse::RenderSettings::GetStreamingMaxLoadedSplats();
 	const int32 MaxLodBias = FMath::Max(StreamedAsset->LodMeta.LodLevels - 1, 0);
+	const int32 ConfiguredUnderfill = GaussianSimVerse::RenderSettings::GetStreamingLodUnderfillLimit();
+	const bool bInMotion = IsCameraInMotionInternal();
+
+	// Motion: full underfill + motion bias (smooth). Idle: tighter underfill + deeper prefetch (faster detail).
+	const int32 UnderfillLimit = bInMotion
+		? ConfiguredUnderfill
+		: FMath::Min(ConfiguredUnderfill, 1);
+	const bool bPreferFastPromote = !bInMotion || bBootstrapActive;
+	const int32 PrefetchDepth = bInMotion ? PrefetchDepthMotion : PrefetchDepthIdle;
+
+	// Motion bias: force coarser optimal LODs while the camera is moving (fewer fine loads / uploads).
+	const int32 MotionBias = bInMotion
+		? GaussianSimVerse::RenderSettings::GetStreamingMotionLodBias()
+		: 0;
 
 	// Raise LOD globally until the desired set fits the splat budget. This keeps the whole model
 	// visible (uniformly coarser) instead of letting eviction punch holes when zoomed in, where the
 	// distance-based per-leaf selection would otherwise request far more splats than the budget allows.
-	for (int32 LodBias = 0; ; ++LodBias)
+	// Start from MotionBias so motion-time coarseness is always applied before budget pressure.
+	for (int32 LodBias = MotionBias; ; ++LodBias)
 	{
 		OutDesired.Reset();
+		OutPrefetch.Reset();
 		if (bHasEnvironment)
 		{
 			OutDesired.Add(FGaussianStreamChunkKey::MakeEnvironment());
 		}
-		TraverseNode(StreamedAsset->LodTree, ViewOrigin, LodBias, OutDesired);
+		TraverseNode(
+			StreamedAsset->LodTree,
+			ViewOrigin,
+			LodBias,
+			UnderfillLimit,
+			bPreferFastPromote,
+			PrefetchDepth,
+			OutDesired,
+			OutPrefetch);
 
 		if (MaxSplats <= 0 || LodBias >= MaxLodBias)
 		{
@@ -291,6 +476,12 @@ void FGaussianStreamingManager::GatherDesiredChunks(const FVector& ViewOrigin, T
 		{
 			break;
 		}
+	}
+
+	// Prefetch keys must not also be desired (desired already loads via Sync).
+	for (const FGaussianStreamChunkKey& Key : OutDesired)
+	{
+		OutPrefetch.Remove(Key);
 	}
 }
 
@@ -382,6 +573,99 @@ void FGaussianStreamingManager::RemoveResident(
 		}
 		ResidentChunks.Remove(Key);
 	}
+}
+
+bool FGaussianStreamingManager::RemoveSiblingResidents(
+	const FGaussianStreamChunkKey& KeepKey,
+	TArray<TObjectPtr<UGaussianAsset>>& OutAssetsPendingRelease)
+{
+	TArray<FGaussianStreamChunkKey> ToRemove;
+	for (const TPair<FGaussianStreamChunkKey, FResidentChunk>& Pair : ResidentChunks)
+	{
+		if (Pair.Key == KeepKey)
+		{
+			continue;
+		}
+		if (IsSameSpatialSource(Pair.Key, KeepKey))
+		{
+			ToRemove.Add(Pair.Key);
+		}
+	}
+
+	for (const FGaussianStreamChunkKey& Key : ToRemove)
+	{
+		RemoveResident(Key, OutAssetsPendingRelease);
+	}
+	return ToRemove.Num() > 0;
+}
+
+bool FGaussianStreamingManager::EnforceSingleResidentPerLeaf(
+	TArray<TObjectPtr<UGaussianAsset>>& OutAssetsPendingRelease)
+{
+	// Group resident keys by spatial identity.
+	TMap<int32, TArray<FGaussianStreamChunkKey>> ByLeaf;
+	TArray<FGaussianStreamChunkKey> EnvironmentKeys;
+	ByLeaf.Reserve(ResidentChunks.Num());
+
+	for (const TPair<FGaussianStreamChunkKey, FResidentChunk>& Pair : ResidentChunks)
+	{
+		if (Pair.Key.bEnvironment)
+		{
+			EnvironmentKeys.Add(Pair.Key);
+			continue;
+		}
+		const int32 GroupId = (Pair.Key.LeafId != INDEX_NONE)
+			? Pair.Key.LeafId
+			: (Pair.Key.FileIndex * 73856093) ^ (Pair.Key.Offset * 19349663) ^ Pair.Key.Count;
+		ByLeaf.FindOrAdd(GroupId).Add(Pair.Key);
+	}
+
+	bool bRemovedAny = false;
+	auto KeepPreferred = [this, &OutAssetsPendingRelease, &bRemovedAny](const TArray<FGaussianStreamChunkKey>& Keys)
+	{
+		if (Keys.Num() <= 1)
+		{
+			return;
+		}
+
+		// Prefer desired (finest desired if multiple); else finest loaded (lowest LodLevel).
+		FGaussianStreamChunkKey Keep = Keys[0];
+		bool bFoundDesired = false;
+		for (const FGaussianStreamChunkKey& Key : Keys)
+		{
+			if (!DesiredKeys.Contains(Key))
+			{
+				continue;
+			}
+			if (!bFoundDesired || Key.LodLevel < Keep.LodLevel)
+			{
+				Keep = Key;
+				bFoundDesired = true;
+			}
+		}
+		if (!bFoundDesired)
+		{
+			for (const FGaussianStreamChunkKey& Key : Keys)
+			{
+				if (Key.LodLevel < Keep.LodLevel)
+				{
+					Keep = Key;
+				}
+			}
+		}
+
+		if (RemoveSiblingResidents(Keep, OutAssetsPendingRelease))
+		{
+			bRemovedAny = true;
+		}
+	};
+
+	for (const TPair<int32, TArray<FGaussianStreamChunkKey>>& Pair : ByLeaf)
+	{
+		KeepPreferred(Pair.Value);
+	}
+	KeepPreferred(EnvironmentKeys);
+	return bRemovedAny;
 }
 
 void FGaussianStreamingManager::ReleaseDeferredAssets(const TArray<TObjectPtr<UGaussianAsset>>& Assets)
@@ -477,6 +761,22 @@ void FGaussianStreamingManager::SyncDesiredChunks(const TSet<FGaussianStreamChun
 			continue;
 		}
 
+		// Make room for desired loads by dropping unstarted prefetch/stale slots first.
+		if (PendingLoads.Num() >= MaxPendingLoadSlots)
+		{
+			for (int32 Index = PendingLoads.Num() - 1; Index >= 0 && PendingLoads.Num() >= MaxPendingLoadSlots; --Index)
+			{
+				if (!PendingLoads[Index].bStarted && !Desired.Contains(PendingLoads[Index].Key))
+				{
+					PendingLoads.RemoveAtSwap(Index);
+				}
+			}
+		}
+		if (PendingLoads.Num() >= MaxPendingLoadSlots)
+		{
+			continue;
+		}
+
 		FPendingLoad Pending;
 		Pending.Key = Key;
 		Pending.ChunkDirectory = ChunkDirectory;
@@ -487,6 +787,79 @@ void FGaussianStreamingManager::SyncDesiredChunks(const TSet<FGaussianStreamChun
 		Pending.LastRequestedFrame = GFrameNumber;
 		PendingLoads.Add(MoveTemp(Pending));
 	}
+}
+
+void FGaussianStreamingManager::EnqueuePrefetchLoads(const TSet<FGaussianStreamChunkKey>& Prefetch)
+{
+	for (const FGaussianStreamChunkKey& Key : Prefetch)
+	{
+		if (PendingLoads.Num() >= MaxPendingLoadSlots)
+		{
+			break;
+		}
+
+		if (ResidentChunks.Contains(Key))
+		{
+			continue;
+		}
+
+		const bool bAlreadyPending = PendingLoads.ContainsByPredicate([&Key](const FPendingLoad& Load)
+		{
+			return Load.Key == Key;
+		});
+		if (bAlreadyPending)
+		{
+			for (FPendingLoad& Load : PendingLoads)
+			{
+				if (Load.Key == Key)
+				{
+					Load.LastRequestedFrame = GFrameNumber;
+					break;
+				}
+			}
+			continue;
+		}
+
+		const FString ChunkDirectory = MakeChunkDirectoryForKey(Key);
+		if (ChunkDirectory.IsEmpty())
+		{
+			continue;
+		}
+
+		FPendingLoad Pending;
+		Pending.Key = Key;
+		Pending.ChunkDirectory = ChunkDirectory;
+		Pending.LocalBounds = BoundsForKey(Key);
+		Pending.Range = RangeForKey(Key);
+		Pending.Result = MakeShared<FGaussianStreamingLoadResult>();
+		Pending.Result->Key = Key;
+		Pending.LastRequestedFrame = GFrameNumber;
+		PendingLoads.Add(MoveTemp(Pending));
+	}
+}
+
+void FGaussianStreamingManager::ApplyDesiredAndPrefetch(
+	const FVector& ViewOrigin,
+	bool bUpdateSampledView,
+	const FVector& ViewDirection)
+{
+	TSet<FGaussianStreamChunkKey> Desired;
+	TSet<FGaussianStreamChunkKey> Prefetch;
+	GatherDesiredChunks(ViewOrigin, Desired, Prefetch);
+	DesiredKeys = MoveTemp(Desired);
+	PrefetchKeys = MoveTemp(Prefetch);
+
+	if (bUpdateSampledView)
+	{
+		LastSampledViewOrigin = ViewOrigin;
+		LastSampledViewDirection = ViewDirection.GetSafeNormal();
+		bHasSampledViewOrigin = true;
+		bHasSampledViewDirection = true;
+		LastResampleFrame = GFrameNumber;
+	}
+
+	SyncDesiredChunks(DesiredKeys);
+	EnqueuePrefetchLoads(PrefetchKeys);
 }
 
 int32 FGaussianStreamingManager::CountMissingDesiredChunks() const
@@ -566,23 +939,115 @@ void FGaussianStreamingManager::MaybeEndBootstrap()
 	}
 }
 
+bool FGaussianStreamingManager::NeedsDetailCatchUp() const
+{
+	return CountMissingDesiredChunks() > 0
+		|| PrefetchKeys.Num() > 0
+		|| PendingLoads.Num() > 0;
+}
+
+int32 FGaussianStreamingManager::CountStartedPendingLoads() const
+{
+	int32 Count = 0;
+	for (const FPendingLoad& Load : PendingLoads)
+	{
+		if (Load.bStarted && Load.Result.IsValid() && !Load.Result->IsFinished())
+		{
+			++Count;
+		}
+	}
+	return Count;
+}
+
+int32 FGaussianStreamingManager::CountFinishedPendingLoads() const
+{
+	int32 Count = 0;
+	for (const FPendingLoad& Load : PendingLoads)
+	{
+		if (Load.bStarted && Load.Result.IsValid() && Load.Result->IsFinished() && Load.Result->bSuccess)
+		{
+			++Count;
+		}
+	}
+	return Count;
+}
+
+void FGaussianStreamingManager::TrimPendingLoadQueue()
+{
+	// 1) Drop unstarted non-desired when queue is too large (keep desired slots).
+	if (PendingLoads.Num() > MaxPendingLoadSlots)
+	{
+		for (int32 Index = PendingLoads.Num() - 1; Index >= 0 && PendingLoads.Num() > MaxPendingLoadSlots; --Index)
+		{
+			const FPendingLoad& Load = PendingLoads[Index];
+			if (!Load.bStarted && !DesiredKeys.Contains(Load.Key))
+			{
+				PendingLoads.RemoveAtSwap(Index);
+			}
+		}
+	}
+
+	// 2) Drop finished non-desired results waiting for commit — these hold multi-MB GPU staging arrays.
+	int32 FinishedSuccess = CountFinishedPendingLoads();
+	if (FinishedSuccess > MaxFinishedPendingResults)
+	{
+		for (int32 Index = PendingLoads.Num() - 1; Index >= 0 && FinishedSuccess > MaxFinishedPendingResults; --Index)
+		{
+			FPendingLoad& Load = PendingLoads[Index];
+			if (!Load.bStarted || !Load.Result.IsValid() || !Load.Result->IsFinished() || !Load.Result->bSuccess)
+			{
+				continue;
+			}
+			if (DesiredKeys.Contains(Load.Key))
+			{
+				continue;
+			}
+			// Release large arrays immediately.
+			Load.Result->Splats.Empty();
+			Load.Result->PreparedGpuSplats.Empty();
+			Load.Result->PreparedPositions.Empty();
+			Load.Result->ShCoefficients.Empty();
+			PendingLoads.RemoveAtSwap(Index);
+			--FinishedSuccess;
+		}
+	}
+}
+
 int32 FGaussianStreamingManager::GetMaxStartsPerUpdate() const
 {
 	const int32 Steady = GaussianSimVerse::RenderSettings::GetStreamingMaxLoadsPerFrame();
+	const int32 InFlight = CountStartedPendingLoads();
+	const int32 Room = FMath::Max(0, MaxConcurrentStartedLoads - InFlight);
+	if (Room <= 0)
+	{
+		return 0;
+	}
+
+	int32 Wanted = Steady;
 	if (bBootstrapActive)
 	{
-		return FMath::Clamp(FMath::Max(Steady, MaxStartsPerUpdateBootstrap), 1, 16);
+		Wanted = FMath::Max(Steady, MaxStartsPerUpdateBootstrap);
 	}
-	// Catch-up while desired set is incomplete: keep async workers fed so LOD swaps finish sooner.
-	if (CountMissingDesiredChunks() > 0)
+	else if (IsCameraInMotionInternal())
 	{
-		return FMath::Clamp(FMath::Max(Steady, MaxStartsPerUpdateMotion), 1, 16);
+		Wanted = FMath::Min(Steady, MaxStartsPerUpdateMotion);
 	}
-	if (IsCameraInMotionInternal())
+	else if (NeedsDetailCatchUp())
 	{
-		return FMath::Clamp(FMath::Max(Steady, MaxStartsPerUpdateMotion), 1, 16);
+		Wanted = FMath::Max(Steady, MaxStartsPerUpdateCatchUp);
 	}
-	return FMath::Clamp(Steady + MaxStartsPerUpdateIdleExtra, 1, 16);
+	else
+	{
+		Wanted = Steady + MaxStartsPerUpdateIdleExtra;
+	}
+
+	// Also stop starting when too many finished results are already waiting to commit (RAM).
+	if (CountFinishedPendingLoads() >= MaxFinishedPendingResults)
+	{
+		return 0;
+	}
+
+	return FMath::Clamp(FMath::Min(Wanted, Room), 0, MaxConcurrentStartedLoads);
 }
 
 int32 FGaussianStreamingManager::GetMaxCompletedLoadsPerUpdate() const
@@ -594,50 +1059,102 @@ int32 FGaussianStreamingManager::GetMaxCompletedLoadsPerUpdate() const
 	// While the camera is moving, keep commits low even if desired is incomplete.
 	if (IsCameraInMotionInternal())
 	{
-		return MaxCompletedLoadsPerUpdateSteady;
+		return MaxCompletedLoadsPerUpdateMotion;
 	}
-	if (CountMissingDesiredChunks() > 0)
+	if (NeedsDetailCatchUp())
 	{
 		return MaxCompletedLoadsPerUpdateCatchUp;
 	}
 	return MaxCompletedLoadsPerUpdateIdle;
 }
 
+int32 FGaussianStreamingManager::GetMaxCommitSplatsThisUpdate() const
+{
+	const int32 Base = GaussianSimVerse::RenderSettings::GetStreamingMaxCommitSplatsPerFrame();
+	if (Base <= 0)
+	{
+		return 0; // unlimited
+	}
+	if (bBootstrapActive)
+	{
+		return Base * 2;
+	}
+	if (IsCameraInMotionInternal())
+	{
+		return FMath::Max(Base / 2, 100000);
+	}
+	if (NeedsDetailCatchUp())
+	{
+		// Modest catch-up — previous 3x flooded RAM and prolonged LOD thrash after stop.
+		return Base;
+	}
+	return Base;
+}
+
 void FGaussianStreamingManager::StartPendingLoads()
 {
 	const int32 MaxStarts = GetMaxStartsPerUpdate();
+	if (MaxStarts <= 0)
+	{
+		return;
+	}
+
 	int32 Started = 0;
 
-	for (FPendingLoad& Pending : PendingLoads)
+	// Two passes: start Desired loads first, then prefetch — improves time-to-visible quality.
+	auto TryStart = [this, &Started, MaxStarts](const bool bDesiredOnly)
 	{
-		if (Pending.bStarted || Started >= MaxStarts)
+		for (FPendingLoad& Pending : PendingLoads)
 		{
-			continue;
-		}
-
-		Pending.bStarted = true;
-		++Started;
-
-		const FString Directory = Pending.ChunkDirectory;
-		const FGaussianSogChunkLoader::FLoadRange Range = Pending.Range;
-		const TSharedPtr<FGaussianStreamingLoadResult> Result = Pending.Result;
-
-		AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [Directory, Range, Result]()
-		{
-			Result->bSuccess = FGaussianSogChunkLoader::LoadDirectory(
-				Directory,
-				Result->Splats,
-				Result->Error,
-				&Result->ShCoefficients,
-				&Result->ImportedShDegree,
-				&Range);
-			if (Result->bSuccess)
+			if (Pending.bStarted || Started >= MaxStarts)
 			{
-				PrepareStreamingChunkGpuData(*Result);
+				continue;
 			}
-			Result->MarkFinished();
-		});
-	}
+			const bool bIsDesired = DesiredKeys.Contains(Pending.Key);
+			if (bDesiredOnly != bIsDesired)
+			{
+				continue;
+			}
+
+			// Skip starting if already over resident splat budget (desired still allowed if under by little).
+			const int32 MaxSplats = GaussianSimVerse::RenderSettings::GetStreamingMaxLoadedSplats();
+			if (MaxSplats > 0 && !bIsDesired && GetLoadedSplatCount() >= MaxSplats)
+			{
+				continue;
+			}
+
+			Pending.bStarted = true;
+			++Started;
+
+			const FString Directory = Pending.ChunkDirectory;
+			const FGaussianSogChunkLoader::FLoadRange Range = Pending.Range;
+			const TSharedPtr<FGaussianStreamingLoadResult> Result = Pending.Result;
+
+			AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [Directory, Range, Result]()
+			{
+				Result->bSuccess = FGaussianSogChunkLoader::LoadDirectory(
+					Directory,
+					Result->Splats,
+					Result->Error,
+					&Result->ShCoefficients,
+					&Result->ImportedShDegree,
+					&Range);
+				if (Result->bSuccess)
+				{
+					PrepareStreamingChunkGpuData(*Result);
+				}
+				else
+				{
+					Result->Splats.Empty();
+					Result->ShCoefficients.Empty();
+				}
+				Result->MarkFinished();
+			});
+		}
+	};
+
+	TryStart(/*bDesiredOnly=*/true);
+	TryStart(/*bDesiredOnly=*/false);
 }
 
 bool FGaussianStreamingManager::ShouldResampleDesired(const FVector& ViewOrigin, const FVector& ViewDirection) const
@@ -681,16 +1198,35 @@ bool FGaussianStreamingManager::IsCameraInMotion() const
 	return IsCameraInMotionInternal();
 }
 
-void FGaussianStreamingManager::ProcessCompletedLoads()
+int32 FGaussianStreamingManager::ProcessCompletedLoads()
 {
 	if (!Owner || !Scene || !StreamedAsset)
 	{
-		return;
+		return 0;
 	}
 
-	bool bSceneDirty = false;
-	int32 CompletedThisUpdate = 0;
-	const int32 MaxCompletedThisUpdate = GetMaxCompletedLoadsPerUpdate();
+	auto EstimateIncomingSplats = [](const FPendingLoad& Pending) -> int32
+	{
+		if (!Pending.Result.IsValid())
+		{
+			return FMath::Max(Pending.Key.Count, 0);
+		}
+		if (Pending.Result->PreparedGpuSplats.Num() > 0)
+		{
+			return Pending.Result->PreparedGpuSplats.Num();
+		}
+		if (Pending.Result->Splats.Num() > 0)
+		{
+			return Pending.Result->Splats.Num();
+		}
+		return FMath::Max(Pending.Key.Count, 0);
+	};
+
+	// Drop failed jobs; collect successful ready keys for budgeted commit.
+	TArray<FGaussianStreamChunkKey> ReadyKeys;
+	TArray<int32> ReadySplatCounts;
+	ReadyKeys.Reserve(PendingLoads.Num());
+	ReadySplatCounts.Reserve(PendingLoads.Num());
 
 	for (int32 Index = PendingLoads.Num() - 1; Index >= 0; --Index)
 	{
@@ -710,26 +1246,165 @@ void FGaussianStreamingManager::ProcessCompletedLoads()
 			continue;
 		}
 
+		ReadyKeys.Add(Pending.Key);
+		ReadySplatCounts.Add(EstimateIncomingSplats(Pending));
+	}
+
+	if (ReadyKeys.Num() == 0)
+	{
+		return 0;
+	}
+
+	// Desired first (visible quality), then smallest-first to pack the splat budget.
+	TArray<int32> Order;
+	Order.Reserve(ReadyKeys.Num());
+	for (int32 i = 0; i < ReadyKeys.Num(); ++i)
+	{
+		Order.Add(i);
+	}
+	Order.Sort([this, &ReadyKeys, &ReadySplatCounts](const int32 A, const int32 B)
+	{
+		const bool bDesiredA = DesiredKeys.Contains(ReadyKeys[A]);
+		const bool bDesiredB = DesiredKeys.Contains(ReadyKeys[B]);
+		if (bDesiredA != bDesiredB)
+		{
+			return bDesiredA; // desired before prefetch
+		}
+		return ReadySplatCounts[A] < ReadySplatCounts[B];
+	});
+
+	bool bSceneDirty = false;
+	int32 CompletedThisUpdate = 0;
+	int32 SplatsCommittedThisUpdate = 0;
+	const int32 MaxCompletedThisUpdate = GetMaxCompletedLoadsPerUpdate();
+	const int32 MaxCommitSplats = GetMaxCommitSplatsThisUpdate();
+
+	for (const int32 OrderIndex : Order)
+	{
 		if (CompletedThisUpdate >= MaxCompletedThisUpdate)
 		{
 			break;
 		}
 
-		UGaussianAsset* Asset = NewObject<UGaussianAsset>(Owner, NAME_None, RF_Transient);
-		if (Pending.Result->PreparedGpuSplats.Num() > 0)
+		const FGaussianStreamChunkKey TargetKey = ReadyKeys[OrderIndex];
+		const int32 IncomingSplats = ReadySplatCounts[OrderIndex];
+
+		// Soft splat budget: always allow the first commit this update so a single huge chunk
+		// larger than the budget cannot stall streaming forever.
+		if (MaxCommitSplats > 0
+			&& CompletedThisUpdate > 0
+			&& (SplatsCommittedThisUpdate + IncomingSplats) > MaxCommitSplats)
 		{
+			break;
+		}
+
+		const int32 PendingIndex = PendingLoads.IndexOfByPredicate([&TargetKey](const FPendingLoad& Load)
+		{
+			return Load.Key == TargetKey
+				&& Load.bStarted
+				&& Load.Result.IsValid()
+				&& Load.Result->IsFinished()
+				&& Load.Result->bSuccess;
+		});
+		if (PendingIndex == INDEX_NONE)
+		{
+			continue;
+		}
+
+		// Already resident (duplicate finish) — drop the pending slot.
+		if (ResidentChunks.Contains(TargetKey))
+		{
+			if (PendingLoads[PendingIndex].Result.IsValid())
+			{
+				PendingLoads[PendingIndex].Result->Splats.Empty();
+				PendingLoads[PendingIndex].Result->PreparedGpuSplats.Empty();
+				PendingLoads[PendingIndex].Result->PreparedPositions.Empty();
+				PendingLoads[PendingIndex].Result->ShCoefficients.Empty();
+			}
+			PendingLoads.RemoveAtSwap(PendingIndex);
+			continue;
+		}
+
+		// Hard resident budget: refuse commit that would exceed MaxLoadedSplats (except empty scene).
+		const int32 MaxResidentSplats = GaussianSimVerse::RenderSettings::GetStreamingMaxLoadedSplats();
+		const int32 LoadedNow = GetLoadedSplatCount();
+		if (MaxResidentSplats > 0
+			&& LoadedNow > 0
+			&& (LoadedNow + IncomingSplats) > MaxResidentSplats)
+		{
+			// Estimate splat count freed by replacing same-leaf siblings (do not free until we know it helps).
+			int32 SiblingSplatCount = 0;
+			for (const TPair<FGaussianStreamChunkKey, FResidentChunk>& Pair : ResidentChunks)
+			{
+				if (Pair.Key != TargetKey && IsSameSpatialSource(Pair.Key, TargetKey) && Pair.Value.Asset)
+				{
+					SiblingSplatCount += FMath::Max(Pair.Value.Asset->GaussianCount, 0);
+				}
+			}
+
+			const int32 AfterSwap = LoadedNow - SiblingSplatCount + IncomingSplats;
+			if (SiblingSplatCount > 0 && AfterSwap <= MaxResidentSplats)
+			{
+				TArray<TObjectPtr<UGaussianAsset>> Freed;
+				if (RemoveSiblingResidents(TargetKey, Freed))
+				{
+					ReleaseDeferredAssets(Freed);
+					bSceneDirty = true;
+				}
+			}
+			else if (!DesiredKeys.Contains(TargetKey))
+			{
+				// Prefetch that cannot fit: drop to free RAM.
+				if (PendingLoads[PendingIndex].Result.IsValid())
+				{
+					PendingLoads[PendingIndex].Result->Splats.Empty();
+					PendingLoads[PendingIndex].Result->PreparedGpuSplats.Empty();
+					PendingLoads[PendingIndex].Result->PreparedPositions.Empty();
+					PendingLoads[PendingIndex].Result->ShCoefficients.Empty();
+				}
+				PendingLoads.RemoveAtSwap(PendingIndex);
+				continue;
+			}
+			else if ((GetLoadedSplatCount() + IncomingSplats) > MaxResidentSplats)
+			{
+				// Desired but still over budget even after a potential sibling swap — wait (no hole).
+				continue;
+			}
+		}
+
+		FPendingLoad& Pending = PendingLoads[PendingIndex];
+
+		// Detach payload from the pending result first so we never hold two full copies
+		// (Result + Asset) during commit — critical under low page-file conditions.
+		const int32 ImportedShDegree = Pending.Result->ImportedShDegree;
+		const FGaussianBounds PreparedBounds = Pending.Result->PreparedBounds;
+		TArray<FGaussianSplatGPU> PreparedGpuSplats = MoveTemp(Pending.Result->PreparedGpuSplats);
+		TArray<FVector4f> PreparedPositions = MoveTemp(Pending.Result->PreparedPositions);
+		TArray<float> PreparedSh = MoveTemp(Pending.Result->ShCoefficients);
+		TArray<FGaussianSplatData> PreparedStaging = MoveTemp(Pending.Result->Splats);
+		Pending.Result->PreparedGpuSplats.Empty();
+		Pending.Result->PreparedPositions.Empty();
+		Pending.Result->ShCoefficients.Empty();
+		Pending.Result->Splats.Empty();
+
+		UGaussianAsset* Asset = NewObject<UGaussianAsset>(Owner, NAME_None, RF_Transient);
+		if (PreparedGpuSplats.Num() > 0)
+		{
+			// Staging already consumed on worker; pass empty staging to avoid CPU duplicates.
+			PreparedStaging.Empty();
 			Asset->SetPreparedStreamingData(
-				MoveTemp(Pending.Result->Splats),
-				MoveTemp(Pending.Result->ShCoefficients),
-				Pending.Result->ImportedShDegree,
-				Pending.Result->PreparedBounds,
-				MoveTemp(Pending.Result->PreparedGpuSplats),
-				MoveTemp(Pending.Result->PreparedPositions));
+				MoveTemp(PreparedStaging),
+				MoveTemp(PreparedSh),
+				ImportedShDegree,
+				PreparedBounds,
+				MoveTemp(PreparedGpuSplats),
+				MoveTemp(PreparedPositions));
 		}
 		else
 		{
-			Asset->SetStagingData(Pending.Result->Splats, MoveTemp(Pending.Result->ShCoefficients), Pending.Result->ImportedShDegree);
+			Asset->SetStagingData(PreparedStaging, MoveTemp(PreparedSh), ImportedShDegree);
 			Asset->InitGPUResources();
+			PreparedStaging.Empty();
 		}
 
 		UGaussianChunk* Chunk = NewObject<UGaussianChunk>(Scene, NAME_None, RF_Transient);
@@ -744,15 +1419,19 @@ void FGaussianStreamingManager::ProcessCompletedLoads()
 		FResidentChunk Resident;
 		Resident.Chunk = Chunk;
 		Resident.Asset = Asset;
-		Resident.Key = Pending.Key;
+		Resident.Key = TargetKey;
 		Resident.LastTouchedFrame = GFrameNumber;
-		ResidentChunks.Add(Pending.Key, MoveTemp(Resident));
+		ResidentChunks.Add(TargetKey, MoveTemp(Resident));
 
-		PendingLoads.RemoveAtSwap(Index);
+		PendingLoads.RemoveAtSwap(PendingIndex);
 		bSceneDirty = true;
 		++CompletedThisUpdate;
+		SplatsCommittedThisUpdate += IncomingSplats;
 	}
 
+	// Sibling drop is deferred until after ApplyDesiredAndPrefetch in UpdateStreaming so underfill
+	// can promote Desired to the newly resident finer slice, then EnforceSingleResidentPerLeaf
+	// keeps only one slice per leaf before FlushDirtySceneProxies (no double-draw frame).
 	if (bSceneDirty)
 	{
 		if (Owner)
@@ -761,42 +1440,49 @@ void FGaussianStreamingManager::ProcessCompletedLoads()
 		}
 		FGaussianRenderer::Get().MarkSceneDirty(Scene, false);
 	}
+
+	return CompletedThisUpdate;
 }
 
 void FGaussianStreamingManager::UnloadSupersededChunks()
 {
-	if (!Scene || DesiredKeys.Num() == 0)
-	{
-		return;
-	}
-
-	TArray<FGaussianStreamChunkKey> ToRemove;
-	for (const TPair<FGaussianStreamChunkKey, FResidentChunk>& Pair : ResidentChunks)
-	{
-		if (DesiredKeys.Contains(Pair.Key))
-		{
-			continue;
-		}
-		if (HasResidentReplacementFor(Pair.Key, DesiredKeys))
-		{
-			ToRemove.Add(Pair.Key);
-		}
-	}
-
-	if (ToRemove.Num() == 0)
+	if (!Scene)
 	{
 		return;
 	}
 
 	TArray<TObjectPtr<UGaussianAsset>> AssetsToRelease;
-	AssetsToRelease.Reserve(ToRemove.Num());
+
+	// Hard rule: never keep two LOD slices of the same leaf resident (atomic display).
+	// Prefer DesiredKeys member when present, else the finest loaded slice.
+	EnforceSingleResidentPerLeaf(AssetsToRelease);
+
+	TArray<FGaussianStreamChunkKey> ToRemove;
+	if (DesiredKeys.Num() > 0)
+	{
+		for (const TPair<FGaussianStreamChunkKey, FResidentChunk>& Pair : ResidentChunks)
+		{
+			if (DesiredKeys.Contains(Pair.Key))
+			{
+				continue;
+			}
+			if (HasResidentReplacementFor(Pair.Key, DesiredKeys))
+			{
+				ToRemove.Add(Pair.Key);
+			}
+		}
+	}
+
 	for (const FGaussianStreamChunkKey& Key : ToRemove)
 	{
 		RemoveResident(Key, AssetsToRelease);
 	}
 
-	FGaussianRenderer::Get().MarkSceneDirty(Scene, false);
-	ReleaseDeferredAssets(AssetsToRelease);
+	if (AssetsToRelease.Num() > 0)
+	{
+		FGaussianRenderer::Get().MarkSceneDirty(Scene, false);
+		ReleaseDeferredAssets(AssetsToRelease);
+	}
 }
 
 void FGaussianStreamingManager::EvictExcessChunks()
@@ -856,17 +1542,23 @@ void FGaussianStreamingManager::UpdateStreaming(const FVector& ViewOrigin, const
 		return;
 	}
 
-	if (ShouldResampleDesired(ViewOrigin, ViewDirection))
+	// View-driven resample (camera moved/turned) vs motion-window settling (bias drop).
+	const bool bViewChanged = ShouldResampleDesired(ViewOrigin, ViewDirection);
+	// Treat this frame as in-motion if the view crossed the resample threshold, so MotionLodBias
+	// applies on the first moving frame (before LastResampleFrame is refreshed).
+	const bool bInMotion = IsCameraInMotionInternal() || bViewChanged;
+	const bool bMotionEnded = bWasCameraInMotion && !bInMotion;
+	bWasCameraInMotion = bInMotion;
+
+	if (bViewChanged || bMotionEnded)
 	{
-		TSet<FGaussianStreamChunkKey> Desired;
-		GatherDesiredChunks(ViewOrigin, Desired);
-		DesiredKeys = Desired;
-		LastSampledViewOrigin = ViewOrigin;
-		LastSampledViewDirection = ViewDirection.GetSafeNormal();
-		bHasSampledViewOrigin = true;
-		bHasSampledViewDirection = true;
-		LastResampleFrame = GFrameNumber;
-		SyncDesiredChunks(DesiredKeys);
+		if (bViewChanged)
+		{
+			// Stamp motion window before gather so GetStreamingMotionLodBias applies this frame.
+			LastResampleFrame = GFrameNumber;
+		}
+		ApplyDesiredAndPrefetch(ViewOrigin, /*bUpdateSampledView=*/bViewChanged, ViewDirection);
+		bWasCameraInMotion = IsCameraInMotionInternal();
 	}
 	else
 	{
@@ -877,12 +1569,24 @@ void FGaussianStreamingManager::UpdateStreaming(const FVector& ViewOrigin, const
 				Resident->LastTouchedFrame = GFrameNumber;
 			}
 		}
+		// Keep prefetch requests alive while waiting for progressive promotions.
+		EnqueuePrefetchLoads(PrefetchKeys);
 	}
 
+	TrimPendingLoadQueue();
 	StartPendingLoads();
-	ProcessCompletedLoads();
+	const int32 CompletedCount = ProcessCompletedLoads();
+	// Underfill depends on residency: re-evaluate so newly loaded finer slices become desired
+	// and superseded coarser siblings can unload without waiting for another camera move.
+	if (CompletedCount > 0)
+	{
+		ApplyDesiredAndPrefetch(ViewOrigin, /*bUpdateSampledView=*/false, ViewDirection);
+		TrimPendingLoadQueue();
+		StartPendingLoads();
+	}
 	UnloadSupersededChunks();
 	EvictExcessChunks();
+	TrimPendingLoadQueue();
 	MaybeEndBootstrap();
 	FGaussianRenderer::Get().FlushDirtySceneProxies();
 

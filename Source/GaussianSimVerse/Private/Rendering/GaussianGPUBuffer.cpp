@@ -47,12 +47,17 @@ void FGaussianGPUBuffer::SetCPUDataPrepared(
 	int32 InImportedShDegree)
 {
 	FScopeLock Lock(&DataLock);
+	// Steal storage (no realloc copy). Clear any previous staging first to free peak RAM.
+	SplatCPUData.Empty();
+	PositionCPUData.Empty();
+	ShCoefficientCPUData.Empty();
+
 	SplatCPUData = MoveTemp(InSplatData);
 	if (InPositions.Num() == SplatCPUData.Num())
 	{
 		PositionCPUData = MoveTemp(InPositions);
 	}
-	else
+	else if (SplatCPUData.Num() > 0)
 	{
 		GaussianGPU::BuildPositionBuffer(SplatCPUData, PositionCPUData);
 	}
@@ -64,7 +69,7 @@ void FGaussianGPUBuffer::SetCPUDataPrepared(
 		ShCoefficientCPUData.Reset();
 		ImportedShDegree = 0;
 	}
-	NumGaussians = SplatCPUData.Num();
+	NumGaussians = static_cast<uint32>(SplatCPUData.Num());
 	bHasShCpuData = (ShCoefficientCPUData.Num() == static_cast<int32>(NumGaussians * GaussianShCoefficientsPerSplat)) ? 1u : 0u;
 	bDirty = true;
 }

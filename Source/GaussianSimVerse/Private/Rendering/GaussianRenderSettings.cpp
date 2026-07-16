@@ -243,14 +243,39 @@ namespace GaussianSimVerse::RenderSettings
 
 	TAutoConsoleVariable<int32> CVarStreamingMaxLoadedSplats(
 		TEXT("r.GaussianSimVerse.Streaming.MaxLoadedSplats"),
-		4000000,
-		TEXT("Maximum resident splats across all streamed chunks (0 = unlimited)."),
+		2000000,
+		TEXT("Maximum resident splats across all streamed chunks (0 = unlimited).\n")
+		TEXT("Default 2M — higher values with multi-LOD streaming can exhaust page file (OOM)."),
 		ECVF_Default);
 
 	TAutoConsoleVariable<int32> CVarStreamingMaxLoadsPerFrame(
 		TEXT("r.GaussianSimVerse.Streaming.MaxLoadsPerFrame"),
 		8,
 		TEXT("Maximum async chunk loads started per frame."),
+		ECVF_Default);
+
+	TAutoConsoleVariable<int32> CVarStreamingMaxCommitSplatsPerFrame(
+		TEXT("r.GaussianSimVerse.Streaming.MaxCommitSplatsPerFrame"),
+		400000,
+		TEXT("Base splat commit budget per streaming update (game-thread + GPU upload).\n")
+		TEXT("Runtime scales this: ~0.5x while moving, ~1x when idle/catching up, ~2x bootstrap.\n")
+		TEXT("0 = unlimited. Always commits at least one finished chunk so loading can progress.\n")
+		TEXT("Keep moderate values — large queues of finished chunks cause page-file OOM."),
+		ECVF_Default);
+
+	TAutoConsoleVariable<int32> CVarStreamingMotionLodBias(
+		TEXT("r.GaussianSimVerse.Streaming.MotionLodBias"),
+		1,
+		TEXT("Extra coarser LOD levels while the camera is moving (0 = off).\n")
+		TEXT("Reduces load/upload spikes during motion; detail recovers after the camera settles."),
+		ECVF_Default);
+
+	TAutoConsoleVariable<int32> CVarStreamingLodUnderfillLimit(
+		TEXT("r.GaussianSimVerse.Streaming.LodUnderfillLimit"),
+		2,
+		TEXT("PlayCanvas-style underfill: max coarser LOD steps when optimal is not resident.\n")
+		TEXT("0: Always request optimal LOD\n")
+		TEXT("1-N: Prefer already-loaded or coarsest-in-range first, then promote one level at a time"),
 		ECVF_Default);
 
 	TAutoConsoleVariable<int32> CVarStreamingDebugDraw(

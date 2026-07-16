@@ -52,7 +52,20 @@ void UGaussianAsset::BeginDestroy()
 
 bool UGaussianAsset::IsValidForRendering() const
 {
-	return GaussianCount > 0 && BulkSplatData.Num() > 0;
+	if (GaussianCount <= 0)
+	{
+		return false;
+	}
+
+	// Imported / serialized assets keep payload in BulkSplatData.
+	if (BulkSplatData.Num() > 0)
+	{
+		return true;
+	}
+
+	// Streamed path: SetPreparedStreamingData intentionally skips Bulk to save RAM.
+	// Validity comes from the GPU buffer (NumGaussians stays set after CPU staging is uploaded).
+	return GPUBuffer.IsValid() && GPUBuffer->HasValidData();
 }
 
 float UGaussianAsset::GetPayloadSizeMB() const
@@ -227,16 +240,18 @@ void UGaussianAsset::SetPreparedStreamingData(
 	TArray<FGaussianSplatGPU>&& InGpuSplats,
 	TArray<FVector4f>&& InPositions)
 {
+	// Streamed path: GPU layout is the source of truth. Do NOT keep Bulk + StagingCache + SH
+	// duplicates — that tripled RAM and OOM'd during aggressive LOD catch-up.
 	Bounds = InBounds;
 	ImportedShDegree = FMath::Clamp(InImportedShDegree, 0, 3);
+	GaussianCount = InGpuSplats.Num() > 0 ? InGpuSplats.Num() : InCenteredStaging.Num();
 
-	EncodeStagingToBulk(InCenteredStaging);
-	EncodeShCoefficientsToBulk(InShCoefficients);
-	GaussianCount = InCenteredStaging.Num();
-
-	StagingCache = MoveTemp(InCenteredStaging);
+	InCenteredStaging.Empty();
+	BulkSplatData.Empty();
+	BulkShCoefficientData.Empty();
+	StagingCache.Empty();
 	bStagingCacheLoaded = true;
-	ShCoefficientCache = InShCoefficients;
+	ShCoefficientCache.Empty();
 	bShCoefficientCacheLoaded = true;
 
 	if (!GPUBuffer.IsValid())
