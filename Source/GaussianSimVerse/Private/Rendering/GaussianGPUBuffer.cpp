@@ -78,6 +78,16 @@ void FGaussianGPUBuffer::ReleaseRenderResources()
 {
 	FScopeLock Lock(&DataLock);
 	ReleasePooledBuffers();
+	// Make the buffer inert: a stale render-thread scene proxy may still hold a shared ref to
+	// this buffer for a frame after the asset is unloaded. Zeroing NumGaussians makes HasValidData()
+	// return false so the stale proxy skips it, and prevents a re-commit from reallocating pooled
+	// buffers and then trying to upload already-moved (empty) CPU staging (which crashes RDG).
+	SplatCPUData.Empty();
+	PositionCPUData.Empty();
+	ShCoefficientCPUData.Empty();
+	NumGaussians = 0;
+	bHasShCpuData = 0;
+	bDirty = false;
 }
 
 void FGaussianGPUBuffer::ReleasePooledBuffers()
@@ -142,7 +152,15 @@ void FGaussianGPUBuffer::UploadToPooledBuffers(FRDGBuilder& GraphBuilder)
 
 	{
 		FScopeLock Lock(&DataLock);
-		if (!bDirty || NumGaussians == 0 || !SplatPooledBuffer.IsValid() || !PositionPooledBuffer.IsValid())
+		// SplatCPUData/PositionCPUData are moved out (emptied) after the first successful upload.
+		// If bDirty is re-set later (e.g. pooled buffers were reallocated) without new CPU data,
+		// skip rather than enqueue a zero-element upload into RDG (which would assert/crash).
+		if (!bDirty
+			|| NumGaussians == 0
+			|| SplatCPUData.Num() == 0
+			|| PositionCPUData.Num() == 0
+			|| !SplatPooledBuffer.IsValid()
+			|| !PositionPooledBuffer.IsValid())
 		{
 			return;
 		}

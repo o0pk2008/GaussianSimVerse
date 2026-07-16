@@ -50,8 +50,9 @@ private:
 	};
 
 	void GatherDesiredChunks(const FVector& ViewOrigin, TSet<FGaussianStreamChunkKey>& OutDesired);
-	void TraverseNode(const FGaussianLodTreeNode& Node, const FVector& ViewOrigin, TSet<FGaussianStreamChunkKey>& OutDesired) const;
-	int32 SelectLodLevel(const FGaussianLodTreeNode& Node, const FVector& ViewOrigin) const;
+	void TraverseNode(const FGaussianLodTreeNode& Node, const FVector& ViewOrigin, int32 LodBias, TSet<FGaussianStreamChunkKey>& OutDesired) const;
+	int32 SelectLodLevel(const FGaussianLodTreeNode& Node, const FVector& ViewOrigin, int32 LodBias) const;
+	static int64 SumDesiredSplatCount(const TSet<FGaussianStreamChunkKey>& Desired);
 	bool IsNodeRelevant(const FGaussianBounds& Bounds, const FVector& ViewOrigin) const;
 	void SyncDesiredChunks(const TSet<FGaussianStreamChunkKey>& Desired);
 	void StartPendingLoads();

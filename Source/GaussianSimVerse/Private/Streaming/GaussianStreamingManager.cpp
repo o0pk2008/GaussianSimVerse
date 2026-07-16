@@ -165,7 +165,7 @@ bool FGaussianStreamingManager::IsNodeRelevant(const FGaussianBounds& Bounds, co
 	return DistSq <= MaxDist * MaxDist;
 }
 
-int32 FGaussianStreamingManager::SelectLodLevel(const FGaussianLodTreeNode& Node, const FVector& ViewOrigin) const
+int32 FGaussianStreamingManager::SelectLodLevel(const FGaussianLodTreeNode& Node, const FVector& ViewOrigin, int32 LodBias) const
 {
 	if (!StreamedAsset || StreamedAsset->LodMeta.LodLevels <= 0)
 	{
@@ -180,12 +180,15 @@ int32 FGaussianStreamingManager::SelectLodLevel(const FGaussianLodTreeNode& Node
 	const float Metric = (Distance / NodeRadius) / FMath::Max(LodBaseDistance, 0.01f);
 	const float ScaledMetric = FMath::Max(Metric, 1.0f) * FMath::Max(LodMultiplier, 0.01f);
 	int32 LodLevel = FMath::FloorToInt(FMath::Log2(ScaledMetric));
+	// LodBias shifts every node coarser (higher level) so the whole desired set fits the splat budget.
+	LodLevel += FMath::Max(LodBias, 0);
 	return FMath::Clamp(LodLevel, 0, StreamedAsset->LodMeta.LodLevels - 1);
 }
 
 void FGaussianStreamingManager::TraverseNode(
 	const FGaussianLodTreeNode& Node,
 	const FVector& ViewOrigin,
+	int32 LodBias,
 	TSet<FGaussianStreamChunkKey>& OutDesired) const
 {
 	if (!IsNodeRelevant(Node.Bounds, ViewOrigin))
@@ -195,31 +198,65 @@ void FGaussianStreamingManager::TraverseNode(
 
 	if (Node.IsLeaf())
 	{
-		const int32 LodLevel = SelectLodLevel(Node, ViewOrigin);
-		const FGaussianLodSlice* Slice = Node.LodSlices.FindByPredicate(
-			[LodLevel](const FGaussianLodSlice& Candidate)
-			{
-				return Candidate.LodLevel == LodLevel;
-			});
+		if (Node.LodSlices.Num() == 0)
+		{
+			return;
+		}
 
-		if (!Slice || Slice->Count <= 0 || !StreamedAsset->LodMeta.Filenames.IsValidIndex(Slice->FileIndex))
+		const int32 DesiredLod = SelectLodLevel(Node, ViewOrigin, LodBias);
+
+		// A leaf may not publish every LOD level (common for object datasets, where a block
+		// only exists at a subset of levels). Snap to the nearest available slice instead of
+		// dropping the block entirely, which previously made blocks vanish at some distances/angles.
+		const FGaussianLodSlice* Best = nullptr;
+		int32 BestDelta = MAX_int32;
+		for (const FGaussianLodSlice& Candidate : Node.LodSlices)
+		{
+			if (Candidate.Count <= 0 || !StreamedAsset->LodMeta.Filenames.IsValidIndex(Candidate.FileIndex))
+			{
+				continue;
+			}
+
+			const int32 Delta = FMath::Abs(Candidate.LodLevel - DesiredLod);
+			// Slices are sorted ascending by level; strict '<' keeps the higher-detail (lower) level on ties.
+			if (Delta < BestDelta)
+			{
+				Best = &Candidate;
+				BestDelta = Delta;
+			}
+		}
+
+		if (!Best)
 		{
 			return;
 		}
 
 		OutDesired.Add(FGaussianStreamChunkKey::MakeSlice(
-			Slice->FileIndex,
-			Slice->Offset,
-			Slice->Count,
-			Slice->LodLevel,
+			Best->FileIndex,
+			Best->Offset,
+			Best->Count,
+			Best->LodLevel,
 			Node.LeafId));
 		return;
 	}
 
 	for (const FGaussianLodTreeNode& Child : Node.Children)
 	{
-		TraverseNode(Child, ViewOrigin, OutDesired);
+		TraverseNode(Child, ViewOrigin, LodBias, OutDesired);
 	}
+}
+
+int64 FGaussianStreamingManager::SumDesiredSplatCount(const TSet<FGaussianStreamChunkKey>& Desired)
+{
+	int64 Total = 0;
+	for (const FGaussianStreamChunkKey& Key : Desired)
+	{
+		if (!Key.bEnvironment)
+		{
+			Total += FMath::Max(Key.Count, 0);
+		}
+	}
+	return Total;
 }
 
 void FGaussianStreamingManager::GatherDesiredChunks(const FVector& ViewOrigin, TSet<FGaussianStreamChunkKey>& OutDesired)
@@ -230,12 +267,31 @@ void FGaussianStreamingManager::GatherDesiredChunks(const FVector& ViewOrigin, T
 		return;
 	}
 
-	if (!StreamedAsset->LodMeta.EnvironmentRelativePath.IsEmpty())
-	{
-		OutDesired.Add(FGaussianStreamChunkKey::MakeEnvironment());
-	}
+	const bool bHasEnvironment = !StreamedAsset->LodMeta.EnvironmentRelativePath.IsEmpty();
+	const int32 MaxSplats = GaussianSimVerse::RenderSettings::GetStreamingMaxLoadedSplats();
+	const int32 MaxLodBias = FMath::Max(StreamedAsset->LodMeta.LodLevels - 1, 0);
 
-	TraverseNode(StreamedAsset->LodTree, ViewOrigin, OutDesired);
+	// Raise LOD globally until the desired set fits the splat budget. This keeps the whole model
+	// visible (uniformly coarser) instead of letting eviction punch holes when zoomed in, where the
+	// distance-based per-leaf selection would otherwise request far more splats than the budget allows.
+	for (int32 LodBias = 0; ; ++LodBias)
+	{
+		OutDesired.Reset();
+		if (bHasEnvironment)
+		{
+			OutDesired.Add(FGaussianStreamChunkKey::MakeEnvironment());
+		}
+		TraverseNode(StreamedAsset->LodTree, ViewOrigin, LodBias, OutDesired);
+
+		if (MaxSplats <= 0 || LodBias >= MaxLodBias)
+		{
+			break;
+		}
+		if (SumDesiredSplatCount(OutDesired) <= static_cast<int64>(MaxSplats))
+		{
+			break;
+		}
+	}
 }
 
 FGaussianBounds FGaussianStreamingManager::BoundsForKey(const FGaussianStreamChunkKey& Key) const
@@ -754,23 +810,34 @@ void FGaussianStreamingManager::EvictExcessChunks()
 	TArray<TObjectPtr<UGaussianAsset>> AssetsToRelease;
 	while (GetLoadedSplatCount() > MaxSplats && ResidentChunks.Num() > 0)
 	{
+		// Only evict chunks that are NOT currently desired. Evicting a desired/visible chunk causes
+		// the "holes while zoomed in" thrash: it gets re-requested and reloaded next frame. The LOD
+		// bias in GatherDesiredChunks keeps the desired total within budget, so the excess here is
+		// always stale (superseded / left-radius) chunks that are safe to drop first.
 		FGaussianStreamChunkKey OldestKey;
 		int32 OldestFrame = MAX_int32;
+		bool bFound = false;
 		for (const TPair<FGaussianStreamChunkKey, FResidentChunk>& Pair : ResidentChunks)
 		{
-			if (!Pair.Key.bEnvironment && Pair.Value.LastTouchedFrame < OldestFrame)
+			if (Pair.Key.bEnvironment || DesiredKeys.Contains(Pair.Key))
+			{
+				continue;
+			}
+			if (!bFound || Pair.Value.LastTouchedFrame < OldestFrame)
 			{
 				OldestFrame = Pair.Value.LastTouchedFrame;
 				OldestKey = Pair.Key;
+				bFound = true;
 			}
 		}
 
-		if (!OldestKey.KeyString.IsEmpty() && ResidentChunks.Contains(OldestKey))
+		if (bFound && ResidentChunks.Contains(OldestKey))
 		{
 			RemoveResident(OldestKey, AssetsToRelease);
 		}
 		else
 		{
+			// Everything left is desired (or environment): stop rather than evict visible geometry.
 			break;
 		}
 	}
