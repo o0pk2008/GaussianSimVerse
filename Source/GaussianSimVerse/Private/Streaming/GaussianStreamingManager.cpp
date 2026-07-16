@@ -22,22 +22,22 @@ namespace
 	// Same-source LOD siblings are never co-resident once a replacement is committed (atomic swap).
 	constexpr int32 StreamingUnloadGraceFrames = 12;
 	constexpr int32 StreamingUnloadGraceFramesMotion = 8;
-	// Motion: low commit throughput (smooth FPS). Idle: moderate (avoid RAM spikes / long thrash).
+	// Motion: low commit throughput (smooth FPS). Idle: faster catch-up (memory path is leaner now).
 	constexpr int32 MaxCompletedLoadsPerUpdateMotion = 1;
-	constexpr int32 MaxCompletedLoadsPerUpdateBootstrap = 4;
-	constexpr int32 MaxStartsPerUpdateBootstrap = 6;
+	constexpr int32 MaxCompletedLoadsPerUpdateBootstrap = 5;
+	constexpr int32 MaxStartsPerUpdateBootstrap = 8;
 	constexpr int32 MaxCompletedLoadsPerUpdateIdle = 2;
 	constexpr int32 MaxStartsPerUpdateMotion = 3;
-	constexpr int32 MaxStartsPerUpdateCatchUp = 4;
+	constexpr int32 MaxStartsPerUpdateCatchUp = 6;
 	constexpr int32 MaxStartsPerUpdateIdleExtra = 2;
-	constexpr int32 MaxCompletedLoadsPerUpdateCatchUp = 3;
+	constexpr int32 MaxCompletedLoadsPerUpdateCatchUp = 4;
 	// After camera stops, wait a bit before promoting detail (reduces continuous LOD thrash).
-	constexpr int32 StreamingMotionWindowFrames = 10;
+	constexpr int32 StreamingMotionWindowFrames = 8;
 	constexpr float StreamingViewResampleDistanceCm = 25.0f;
 	constexpr float StreamingViewResampleAngleDeg = 2.0f;
-	// One step at a time — multi-step prefetch flooded memory (OOM in SetPreparedStreamingData).
+	// Motion: 1 step. Idle: allow one extra prefetch step for faster promotion in-view.
 	constexpr int32 PrefetchDepthMotion = 1;
-	constexpr int32 PrefetchDepthIdle = 1;
+	constexpr int32 PrefetchDepthIdle = 2;
 
 	FGaussianBounds ComputeCenteredBounds(const TArray<FGaussianSplatData>& Splats)
 	{
@@ -81,9 +81,9 @@ namespace
 	}
 
 	/** Hard caps to prevent page-file OOM when idle catch-up queues many multi-MB chunks. */
-	constexpr int32 MaxConcurrentStartedLoads = 3;
-	constexpr int32 MaxPendingLoadSlots = 12;
-	constexpr int32 MaxFinishedPendingResults = 3;
+	constexpr int32 MaxConcurrentStartedLoads = 5;
+	constexpr int32 MaxPendingLoadSlots = 20;
+	constexpr int32 MaxFinishedPendingResults = 5;
 }
 
 void FGaussianStreamingManager::Initialize(
@@ -100,8 +100,11 @@ void FGaussianStreamingManager::Initialize(
 	PrefetchKeys.Reset();
 	LastSampledViewOrigin = FVector::ZeroVector;
 	LastSampledViewDirection = FVector::ForwardVector;
+	PriorityViewOrigin = FVector::ZeroVector;
+	PriorityViewDirection = FVector::ForwardVector;
 	bHasSampledViewOrigin = false;
 	bHasSampledViewDirection = false;
+	bHasPriorityView = false;
 	LastResampleFrame = 0;
 	bWasCameraInMotion = false;
 	bBootstrapActive = true;
@@ -140,8 +143,11 @@ void FGaussianStreamingManager::Shutdown()
 	PrefetchKeys.Reset();
 	LastSampledViewOrigin = FVector::ZeroVector;
 	LastSampledViewDirection = FVector::ForwardVector;
+	PriorityViewOrigin = FVector::ZeroVector;
+	PriorityViewDirection = FVector::ForwardVector;
 	bHasSampledViewOrigin = false;
 	bHasSampledViewDirection = false;
+	bHasPriorityView = false;
 	LastResampleFrame = 0;
 	bWasCameraInMotion = false;
 	bBootstrapActive = true;
@@ -749,6 +755,7 @@ void FGaussianStreamingManager::SyncDesiredChunks(const TSet<FGaussianStreamChun
 				if (Load.Key == Key)
 				{
 					Load.LastRequestedFrame = GFrameNumber;
+					Load.ViewPriority = ComputeViewPriority(Load.LocalBounds);
 					break;
 				}
 			}
@@ -785,6 +792,7 @@ void FGaussianStreamingManager::SyncDesiredChunks(const TSet<FGaussianStreamChun
 		Pending.Result = MakeShared<FGaussianStreamingLoadResult>();
 		Pending.Result->Key = Key;
 		Pending.LastRequestedFrame = GFrameNumber;
+		Pending.ViewPriority = ComputeViewPriority(Pending.LocalBounds);
 		PendingLoads.Add(MoveTemp(Pending));
 	}
 }
@@ -814,6 +822,7 @@ void FGaussianStreamingManager::EnqueuePrefetchLoads(const TSet<FGaussianStreamC
 				if (Load.Key == Key)
 				{
 					Load.LastRequestedFrame = GFrameNumber;
+					Load.ViewPriority = ComputeViewPriority(Load.LocalBounds);
 					break;
 				}
 			}
@@ -834,6 +843,7 @@ void FGaussianStreamingManager::EnqueuePrefetchLoads(const TSet<FGaussianStreamC
 		Pending.Result = MakeShared<FGaussianStreamingLoadResult>();
 		Pending.Result->Key = Key;
 		Pending.LastRequestedFrame = GFrameNumber;
+		Pending.ViewPriority = ComputeViewPriority(Pending.LocalBounds);
 		PendingLoads.Add(MoveTemp(Pending));
 	}
 }
@@ -972,26 +982,86 @@ int32 FGaussianStreamingManager::CountFinishedPendingLoads() const
 	return Count;
 }
 
+float FGaussianStreamingManager::ComputeViewPriority(const FGaussianBounds& Bounds) const
+{
+	if (!bHasPriorityView)
+	{
+		// Fallback: closer to last sample / origin first.
+		const FVector Origin = bHasSampledViewOrigin ? LastSampledViewOrigin : FVector::ZeroVector;
+		return FVector::Dist(Origin, FVector(Bounds.Origin));
+	}
+
+	const FVector Center(Bounds.Origin);
+	const FVector ToCenter = Center - PriorityViewOrigin;
+	const float Dist = FMath::Max(static_cast<float>(ToCenter.Size()), 1.0f);
+	const FVector Dir = PriorityViewDirection.GetSafeNormal();
+	float CosFacing = 0.0f;
+	if (!Dir.IsNearlyZero())
+	{
+		CosFacing = static_cast<float>(FVector::DotProduct(ToCenter / Dist, Dir));
+	}
+
+	// 0 when looking straight at the chunk, grows when off-axis / behind the camera.
+	// Behind (cos < 0) is heavily deprioritized so side/back upgrades wait.
+	const float FacingPenalty = (CosFacing > 0.0f)
+		? (1.0f - CosFacing)           // 0..1 in front hemisphere
+		: (2.0f - CosFacing);          // 2..3 behind camera
+
+	// Prefer near + on-axis. Distance in meters-ish scale keeps numbers stable.
+	return (Dist * 0.01f) * (0.2f + FacingPenalty) + FacingPenalty * 50.0f;
+}
+
+void FGaussianStreamingManager::RefreshPendingViewPriorities()
+{
+	for (FPendingLoad& Load : PendingLoads)
+	{
+		if (!Load.bStarted || (Load.Result.IsValid() && !Load.Result->IsFinished()))
+		{
+			Load.ViewPriority = ComputeViewPriority(Load.LocalBounds);
+		}
+		else if (Load.Result.IsValid() && Load.Result->IsFinished())
+		{
+			// Keep finished jobs prioritised for commit order as well.
+			Load.ViewPriority = ComputeViewPriority(Load.LocalBounds);
+		}
+	}
+}
+
 void FGaussianStreamingManager::TrimPendingLoadQueue()
 {
-	// 1) Drop unstarted non-desired when queue is too large (keep desired slots).
-	if (PendingLoads.Num() > MaxPendingLoadSlots)
+	// 1) Drop unstarted non-desired with worst view priority when queue is too large.
+	while (PendingLoads.Num() > MaxPendingLoadSlots)
 	{
-		for (int32 Index = PendingLoads.Num() - 1; Index >= 0 && PendingLoads.Num() > MaxPendingLoadSlots; --Index)
+		int32 WorstIndex = INDEX_NONE;
+		float WorstScore = -1.0f;
+		for (int32 Index = 0; Index < PendingLoads.Num(); ++Index)
 		{
 			const FPendingLoad& Load = PendingLoads[Index];
-			if (!Load.bStarted && !DesiredKeys.Contains(Load.Key))
+			if (Load.bStarted || DesiredKeys.Contains(Load.Key))
 			{
-				PendingLoads.RemoveAtSwap(Index);
+				continue;
+			}
+			if (Load.ViewPriority > WorstScore)
+			{
+				WorstScore = Load.ViewPriority;
+				WorstIndex = Index;
 			}
 		}
+		if (WorstIndex == INDEX_NONE)
+		{
+			break;
+		}
+		PendingLoads.RemoveAtSwap(WorstIndex);
 	}
 
 	// 2) Drop finished non-desired results waiting for commit — these hold multi-MB GPU staging arrays.
+	// Prefer dropping off-axis / behind-camera first so in-view upgrades keep their slots.
 	int32 FinishedSuccess = CountFinishedPendingLoads();
-	if (FinishedSuccess > MaxFinishedPendingResults)
+	while (FinishedSuccess > MaxFinishedPendingResults)
 	{
-		for (int32 Index = PendingLoads.Num() - 1; Index >= 0 && FinishedSuccess > MaxFinishedPendingResults; --Index)
+		int32 WorstIndex = INDEX_NONE;
+		float WorstScore = -1.0f;
+		for (int32 Index = 0; Index < PendingLoads.Num(); ++Index)
 		{
 			FPendingLoad& Load = PendingLoads[Index];
 			if (!Load.bStarted || !Load.Result.IsValid() || !Load.Result->IsFinished() || !Load.Result->bSuccess)
@@ -1002,14 +1072,23 @@ void FGaussianStreamingManager::TrimPendingLoadQueue()
 			{
 				continue;
 			}
-			// Release large arrays immediately.
-			Load.Result->Splats.Empty();
-			Load.Result->PreparedGpuSplats.Empty();
-			Load.Result->PreparedPositions.Empty();
-			Load.Result->ShCoefficients.Empty();
-			PendingLoads.RemoveAtSwap(Index);
-			--FinishedSuccess;
+			if (Load.ViewPriority > WorstScore)
+			{
+				WorstScore = Load.ViewPriority;
+				WorstIndex = Index;
+			}
 		}
+		if (WorstIndex == INDEX_NONE)
+		{
+			break;
+		}
+		FPendingLoad& Load = PendingLoads[WorstIndex];
+		Load.Result->Splats.Empty();
+		Load.Result->PreparedGpuSplats.Empty();
+		Load.Result->PreparedPositions.Empty();
+		Load.Result->ShCoefficients.Empty();
+		PendingLoads.RemoveAtSwap(WorstIndex);
+		--FinishedSuccess;
 	}
 }
 
@@ -1099,62 +1178,84 @@ void FGaussianStreamingManager::StartPendingLoads()
 		return;
 	}
 
-	int32 Started = 0;
-
-	// Two passes: start Desired loads first, then prefetch — improves time-to-visible quality.
-	auto TryStart = [this, &Started, MaxStarts](const bool bDesiredOnly)
+	// Sort unstarted jobs: Desired first, then best view priority (looking-at / near).
+	TArray<int32> UnstartedOrder;
+	UnstartedOrder.Reserve(PendingLoads.Num());
+	for (int32 Index = 0; Index < PendingLoads.Num(); ++Index)
 	{
-		for (FPendingLoad& Pending : PendingLoads)
+		if (!PendingLoads[Index].bStarted)
 		{
-			if (Pending.bStarted || Started >= MaxStarts)
-			{
-				continue;
-			}
-			const bool bIsDesired = DesiredKeys.Contains(Pending.Key);
-			if (bDesiredOnly != bIsDesired)
-			{
-				continue;
-			}
-
-			// Skip starting if already over resident splat budget (desired still allowed if under by little).
-			const int32 MaxSplats = GaussianSimVerse::RenderSettings::GetStreamingMaxLoadedSplats();
-			if (MaxSplats > 0 && !bIsDesired && GetLoadedSplatCount() >= MaxSplats)
-			{
-				continue;
-			}
-
-			Pending.bStarted = true;
-			++Started;
-
-			const FString Directory = Pending.ChunkDirectory;
-			const FGaussianSogChunkLoader::FLoadRange Range = Pending.Range;
-			const TSharedPtr<FGaussianStreamingLoadResult> Result = Pending.Result;
-
-			AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [Directory, Range, Result]()
-			{
-				Result->bSuccess = FGaussianSogChunkLoader::LoadDirectory(
-					Directory,
-					Result->Splats,
-					Result->Error,
-					&Result->ShCoefficients,
-					&Result->ImportedShDegree,
-					&Range);
-				if (Result->bSuccess)
-				{
-					PrepareStreamingChunkGpuData(*Result);
-				}
-				else
-				{
-					Result->Splats.Empty();
-					Result->ShCoefficients.Empty();
-				}
-				Result->MarkFinished();
-			});
+			UnstartedOrder.Add(Index);
 		}
-	};
+	}
+	UnstartedOrder.Sort([this](const int32 A, const int32 B)
+	{
+		const FPendingLoad& LA = PendingLoads[A];
+		const FPendingLoad& LB = PendingLoads[B];
+		const bool bDesiredA = DesiredKeys.Contains(LA.Key);
+		const bool bDesiredB = DesiredKeys.Contains(LB.Key);
+		if (bDesiredA != bDesiredB)
+		{
+			return bDesiredA;
+		}
+		if (LA.ViewPriority != LB.ViewPriority)
+		{
+			return LA.ViewPriority < LB.ViewPriority;
+		}
+		// Prefer finer LOD upgrades slightly when priorities tie (lower LodLevel first).
+		return LA.Key.LodLevel < LB.Key.LodLevel;
+	});
 
-	TryStart(/*bDesiredOnly=*/true);
-	TryStart(/*bDesiredOnly=*/false);
+	int32 Started = 0;
+	const int32 MaxSplats = GaussianSimVerse::RenderSettings::GetStreamingMaxLoadedSplats();
+
+	for (const int32 Index : UnstartedOrder)
+	{
+		if (Started >= MaxStarts || !PendingLoads.IsValidIndex(Index))
+		{
+			break;
+		}
+
+		FPendingLoad& Pending = PendingLoads[Index];
+		if (Pending.bStarted)
+		{
+			continue;
+		}
+
+		const bool bIsDesired = DesiredKeys.Contains(Pending.Key);
+		if (MaxSplats > 0 && !bIsDesired && GetLoadedSplatCount() >= MaxSplats)
+		{
+			continue;
+		}
+
+		Pending.bStarted = true;
+		++Started;
+
+		const FString Directory = Pending.ChunkDirectory;
+		const FGaussianSogChunkLoader::FLoadRange Range = Pending.Range;
+		const TSharedPtr<FGaussianStreamingLoadResult> Result = Pending.Result;
+
+		AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask, [Directory, Range, Result]()
+		{
+			Result->bSuccess = FGaussianSogChunkLoader::LoadDirectory(
+				Directory,
+				Result->Splats,
+				Result->Error,
+				&Result->ShCoefficients,
+				&Result->ImportedShDegree,
+				&Range);
+			if (Result->bSuccess)
+			{
+				PrepareStreamingChunkGpuData(*Result);
+			}
+			else
+			{
+				Result->Splats.Empty();
+				Result->ShCoefficients.Empty();
+			}
+			Result->MarkFinished();
+		});
+	}
 }
 
 bool FGaussianStreamingManager::ShouldResampleDesired(const FVector& ViewOrigin, const FVector& ViewDirection) const
@@ -1255,20 +1356,40 @@ int32 FGaussianStreamingManager::ProcessCompletedLoads()
 		return 0;
 	}
 
-	// Desired first (visible quality), then smallest-first to pack the splat budget.
+	// Desired first, then best view priority (center of screen / near), then smallest-first.
+	TArray<float> ReadyPriorities;
+	ReadyPriorities.Reserve(ReadyKeys.Num());
+	for (const FGaussianStreamChunkKey& Key : ReadyKeys)
+	{
+		float Priority = TNumericLimits<float>::Max();
+		for (const FPendingLoad& Load : PendingLoads)
+		{
+			if (Load.Key == Key)
+			{
+				Priority = Load.ViewPriority;
+				break;
+			}
+		}
+		ReadyPriorities.Add(Priority);
+	}
+
 	TArray<int32> Order;
 	Order.Reserve(ReadyKeys.Num());
 	for (int32 i = 0; i < ReadyKeys.Num(); ++i)
 	{
 		Order.Add(i);
 	}
-	Order.Sort([this, &ReadyKeys, &ReadySplatCounts](const int32 A, const int32 B)
+	Order.Sort([this, &ReadyKeys, &ReadySplatCounts, &ReadyPriorities](const int32 A, const int32 B)
 	{
 		const bool bDesiredA = DesiredKeys.Contains(ReadyKeys[A]);
 		const bool bDesiredB = DesiredKeys.Contains(ReadyKeys[B]);
 		if (bDesiredA != bDesiredB)
 		{
 			return bDesiredA; // desired before prefetch
+		}
+		if (ReadyPriorities[A] != ReadyPriorities[B])
+		{
+			return ReadyPriorities[A] < ReadyPriorities[B]; // looking-at first
 		}
 		return ReadySplatCounts[A] < ReadySplatCounts[B];
 	});
@@ -1541,6 +1662,12 @@ void FGaussianStreamingManager::UpdateStreaming(const FVector& ViewOrigin, const
 	{
 		return;
 	}
+
+	// Always refresh view for load priority (even when desired set is not resampled this frame).
+	PriorityViewOrigin = ViewOrigin;
+	PriorityViewDirection = ViewDirection.GetSafeNormal();
+	bHasPriorityView = true;
+	RefreshPendingViewPriorities();
 
 	// View-driven resample (camera moved/turned) vs motion-window settling (bias drop).
 	const bool bViewChanged = ShouldResampleDesired(ViewOrigin, ViewDirection);

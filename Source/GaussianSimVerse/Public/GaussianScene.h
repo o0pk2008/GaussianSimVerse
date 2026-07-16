@@ -27,6 +27,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Gaussian")
 	FTransform WorldTransform = FTransform::Identity;
 
+	/**
+	 * Streamed datasets: pivot in dataset space (lod-meta scene origin).
+	 * Used to convert absolute chunk centers into actor-local offsets so moving the actor works.
+	 */
+	FVector DatasetPivot = FVector::ZeroVector;
+	bool bHasDatasetPivot = false;
+
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Gaussian")
 	TArray<TObjectPtr<UGaussianChunk>> Chunks;
 

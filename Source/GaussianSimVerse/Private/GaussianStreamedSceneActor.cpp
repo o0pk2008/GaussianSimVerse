@@ -313,13 +313,18 @@ void AGaussianStreamedSceneActor::PostEditMove(bool bFinished)
 {
 	Super::PostEditMove(bFinished);
 
-	if (!bFinished || !GaussianScene || !bEnableRendering)
+	// Update every drag tick (bFinished==false) so streamed clouds follow the actor while moving,
+	// not only on mouse release.
+	if (!GaussianScene || !bEnableRendering)
 	{
 		return;
 	}
 
 	GaussianScene->WorldTransform = GetActorTransform();
-	FGaussianRenderer::Get().MarkSceneDirty(GaussianScene);
+	if (GaussianScene->IsRegisteredWithRenderer())
+	{
+		FGaussianRenderer::Get().MarkSceneDirty(GaussianScene);
+	}
 }
 
 void AGaussianStreamedSceneActor::Destroyed()
@@ -389,6 +394,10 @@ void AGaussianStreamedSceneActor::InitializeStreaming(bool bForceRestart)
 		ShutdownStreaming();
 		return;
 	}
+
+	// Always keep dataset pivot in sync (needed for actor-local chunk placement).
+	GaussianScene->DatasetPivot = FVector(StreamedSceneAsset->LodMeta.SceneBounds.Origin);
+	GaussianScene->bHasDatasetPivot = true;
 
 	if (!bForceRestart
 		&& bStreamingInitialized
@@ -488,6 +497,7 @@ void AGaussianStreamedSceneActor::UnregisterScene()
 
 FVector AGaussianStreamedSceneActor::GetStreamingViewOrigin() const
 {
+	FVector WorldView = GetActorLocation();
 	if (const UWorld* World = GetWorld())
 	{
 		if (const APlayerController* PC = World->GetFirstPlayerController())
@@ -495,22 +505,29 @@ FVector AGaussianStreamedSceneActor::GetStreamingViewOrigin() const
 			FVector ViewLocation;
 			FRotator ViewRotation;
 			PC->GetPlayerViewPoint(ViewLocation, ViewRotation);
-			return ViewLocation;
+			WorldView = ViewLocation;
 		}
-
 #if WITH_EDITOR
-		if (World->WorldType == EWorldType::Editor && GCurrentLevelEditingViewportClient)
+		else if (World->WorldType == EWorldType::Editor && GCurrentLevelEditingViewportClient)
 		{
-			return GCurrentLevelEditingViewportClient->GetViewLocation();
+			WorldView = GCurrentLevelEditingViewportClient->GetViewLocation();
 		}
 #endif
 	}
 
-	return GetActorLocation();
+	// LOD tree bounds are in dataset space. Convert camera into dataset space so streaming still
+	// works after the actor has been translated/rotated (world = Actor * (dataset - DatasetPivot)).
+	if (StreamedSceneAsset)
+	{
+		const FVector Pivot = FVector(StreamedSceneAsset->LodMeta.SceneBounds.Origin);
+		return Pivot + GetActorTransform().InverseTransformPosition(WorldView);
+	}
+	return WorldView;
 }
 
 FVector AGaussianStreamedSceneActor::GetStreamingViewDirection() const
 {
+	FVector WorldDir = GetActorForwardVector();
 	if (const UWorld* World = GetWorld())
 	{
 		if (const APlayerController* PC = World->GetFirstPlayerController())
@@ -518,18 +535,17 @@ FVector AGaussianStreamedSceneActor::GetStreamingViewDirection() const
 			FVector ViewLocation;
 			FRotator ViewRotation;
 			PC->GetPlayerViewPoint(ViewLocation, ViewRotation);
-			return ViewRotation.Vector();
+			WorldDir = ViewRotation.Vector();
 		}
-
 #if WITH_EDITOR
-		if (World->WorldType == EWorldType::Editor && GCurrentLevelEditingViewportClient)
+		else if (World->WorldType == EWorldType::Editor && GCurrentLevelEditingViewportClient)
 		{
-			return GCurrentLevelEditingViewportClient->GetViewRotation().Vector();
+			WorldDir = GCurrentLevelEditingViewportClient->GetViewRotation().Vector();
 		}
 #endif
 	}
 
-	return GetActorForwardVector();
+	return GetActorTransform().InverseTransformVector(WorldDir).GetSafeNormal();
 }
 
 #if WITH_EDITOR

@@ -47,6 +47,8 @@ private:
 		TSharedPtr<struct FGaussianStreamingLoadResult> Result;
 		bool bStarted = false;
 		int32 LastRequestedFrame = 0;
+		/** Lower = more important (center of view / closer). Used to order starts & commits. */
+		float ViewPriority = TNumericLimits<float>::Max();
 	};
 
 	void GatherDesiredChunks(const FVector& ViewOrigin, TSet<FGaussianStreamChunkKey>& OutDesired, TSet<FGaussianStreamChunkKey>& OutPrefetch);
@@ -82,6 +84,9 @@ private:
 	void TrimPendingLoadQueue();
 	int32 CountStartedPendingLoads() const;
 	int32 CountFinishedPendingLoads() const;
+	/** Lower score = higher priority (looking at + nearby). */
+	float ComputeViewPriority(const FGaussianBounds& Bounds) const;
+	void RefreshPendingViewPriorities();
 	/** @return Number of successful commits this update. */
 	int32 ProcessCompletedLoads();
 	void EvictExcessChunks();
@@ -125,8 +130,12 @@ private:
 	TSet<FGaussianStreamChunkKey> PrefetchKeys;
 	FVector LastSampledViewOrigin = FVector::ZeroVector;
 	FVector LastSampledViewDirection = FVector::ForwardVector;
+	/** Updated every frame for load priority (even when desired set is not resampled). */
+	FVector PriorityViewOrigin = FVector::ZeroVector;
+	FVector PriorityViewDirection = FVector::ForwardVector;
 	bool bHasSampledViewOrigin = false;
 	bool bHasSampledViewDirection = false;
+	bool bHasPriorityView = false;
 	int32 LastResampleFrame = 0;
 	/** Tracks motion window for bias transitions (re-gather when motion ends). */
 	bool bWasCameraInMotion = false;

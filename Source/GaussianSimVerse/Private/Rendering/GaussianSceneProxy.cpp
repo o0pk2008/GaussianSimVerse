@@ -42,11 +42,25 @@ FGaussianSceneProxy::FGaussianSceneProxy(const UGaussianScene* InScene)
 		FGaussianChunkRenderData ChunkData;
 		ChunkData.GPUBufferShared = Asset->GetGPUBufferShared();
 
+		// GPU splat positions are centered at 0 around Asset->Bounds.Origin (dataset-space center).
+		// Non-streamed assets: LocalBounds.Origin is usually zero (whole model under actor).
+		// Streamed assets: convert dataset-space center into actor-local offset via DatasetPivot so
+		// moving/rotating the actor correctly moves the cloud (old formula locked chunks in world space).
 		const bool bIsStreamedChunk = !Chunk->StreamingKey.KeyString.IsEmpty();
-		const FVector SceneOrigin = LocalToWorld.GetOrigin();
-		const FVector ChunkOffset = bIsStreamedChunk
-			? (FVector(Asset->Bounds.Origin) - SceneOrigin)
-			: FVector(Chunk->LocalBounds.Origin);
+		FVector ChunkOffset = FVector(Chunk->LocalBounds.Origin);
+		if (bIsStreamedChunk)
+		{
+			const FVector DatasetCenter = FVector(Asset->Bounds.Origin);
+			if (InScene->bHasDatasetPivot)
+			{
+				ChunkOffset = DatasetCenter - InScene->DatasetPivot;
+			}
+			else
+			{
+				// Fallback: treat LocalBounds as dataset absolute if pivot missing.
+				ChunkOffset = FVector(Chunk->LocalBounds.Origin) - InScene->DatasetPivot;
+			}
+		}
 		ChunkData.LocalToWorld = LocalToWorld * FTranslationMatrix(ChunkOffset);
 
 		FGaussianBounds ChunkLocalBounds;
