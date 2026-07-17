@@ -22,20 +22,21 @@ namespace
 	// Same-source LOD siblings are never co-resident once a replacement is committed (atomic swap).
 	constexpr int32 StreamingUnloadGraceFrames = 12;
 	constexpr int32 StreamingUnloadGraceFramesMotion = 8;
-	// Motion: low commit throughput (smooth FPS). Idle: faster catch-up (memory path is leaner now).
-	constexpr int32 MaxCompletedLoadsPerUpdateMotion = 1;
-	constexpr int32 MaxCompletedLoadsPerUpdateBootstrap = 5;
-	constexpr int32 MaxStartsPerUpdateBootstrap = 8;
-	constexpr int32 MaxCompletedLoadsPerUpdateIdle = 2;
-	constexpr int32 MaxStartsPerUpdateMotion = 3;
-	constexpr int32 MaxStartsPerUpdateCatchUp = 6;
-	constexpr int32 MaxStartsPerUpdateIdleExtra = 2;
-	constexpr int32 MaxCompletedLoadsPerUpdateCatchUp = 4;
-	// After camera stops, wait a bit before promoting detail (reduces continuous LOD thrash).
-	constexpr int32 StreamingMotionWindowFrames = 8;
-	constexpr float StreamingViewResampleDistanceCm = 25.0f;
-	constexpr float StreamingViewResampleAngleDeg = 2.0f;
-	// Motion: 1 step. Idle: allow one extra prefetch step for faster promotion in-view.
+	// Lean memory path + atomic swap keep FPS stable even at high throughput (validated in-editor).
+	// Defaults favor timely LOD; hard caps below still protect against page-file OOM.
+	constexpr int32 MaxCompletedLoadsPerUpdateMotion = 3;
+	constexpr int32 MaxCompletedLoadsPerUpdateBootstrap = 8;
+	constexpr int32 MaxStartsPerUpdateBootstrap = 12;
+	constexpr int32 MaxCompletedLoadsPerUpdateIdle = 4;
+	constexpr int32 MaxStartsPerUpdateMotion = 8;
+	constexpr int32 MaxStartsPerUpdateCatchUp = 12;
+	constexpr int32 MaxStartsPerUpdateIdleExtra = 4;
+	constexpr int32 MaxCompletedLoadsPerUpdateCatchUp = 8;
+	// Short motion window so stop → promote happens quickly after the camera settles.
+	constexpr int32 StreamingMotionWindowFrames = 4;
+	constexpr float StreamingViewResampleDistanceCm = 12.0f;
+	constexpr float StreamingViewResampleAngleDeg = 1.25f;
+	// With underfill often 0, prefetch still helps stepwise promotion when levels are missing.
 	constexpr int32 PrefetchDepthMotion = 1;
 	constexpr int32 PrefetchDepthIdle = 2;
 
@@ -80,10 +81,10 @@ namespace
 		Result.Splats.Empty();
 	}
 
-	/** Hard caps to prevent page-file OOM when idle catch-up queues many multi-MB chunks. */
-	constexpr int32 MaxConcurrentStartedLoads = 5;
-	constexpr int32 MaxPendingLoadSlots = 20;
-	constexpr int32 MaxFinishedPendingResults = 5;
+	/** Hard caps still protect page file; raised after memory path no longer triples CPU copies. */
+	constexpr int32 MaxConcurrentStartedLoads = 12;
+	constexpr int32 MaxPendingLoadSlots = 48;
+	constexpr int32 MaxFinishedPendingResults = 12;
 }
 
 void FGaussianStreamingManager::Initialize(
@@ -1160,12 +1161,13 @@ int32 FGaussianStreamingManager::GetMaxCommitSplatsThisUpdate() const
 	}
 	if (IsCameraInMotionInternal())
 	{
-		return FMath::Max(Base / 2, 100000);
+		// FPS is stable with lean commit path — allow full base budget while moving.
+		return Base;
 	}
 	if (NeedsDetailCatchUp())
 	{
-		// Modest catch-up — previous 3x flooded RAM and prolonged LOD thrash after stop.
-		return Base;
+		// Settled / incomplete desired: push commits harder (FPS remains stable with lean path).
+		return static_cast<int32>(Base * 2.0f);
 	}
 	return Base;
 }

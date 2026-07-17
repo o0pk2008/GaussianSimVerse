@@ -551,8 +551,9 @@ FVector AGaussianStreamedSceneActor::GetStreamingViewDirection() const
 #if WITH_EDITOR
 namespace
 {
-	constexpr float EditorStreamingIdleIntervalSeconds = 0.05f;
-	constexpr float EditorStreamingMotionIntervalSeconds = 0.016f;
+	// Keep editor streaming near frame-rate so LOD catch-up feels timely in the viewport.
+	constexpr float EditorStreamingIdleIntervalSeconds = 0.016f;
+	constexpr float EditorStreamingMotionIntervalSeconds = 0.0f;
 }
 
 void AGaussianStreamedSceneActor::EnsureEditorStreamingTickInterval()

@@ -69,25 +69,25 @@ public:
 	int32 StreamingMaxLoadedSplats = 2000000;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Streaming|CVar Overrides", meta = (DisplayName = "Max Loads Per Frame", ClampMin = "1", ClampMax = "16", UIMin = "1", UIMax = "16", EditCondition = "bApplyStreamingCVarOverrides"))
-	int32 StreamingMaxLoadsPerFrame = 8;
+	int32 StreamingMaxLoadsPerFrame = 12;
 
 	/**
 	 * Soft budget for splats committed per update (smooths LOD-switch hitches).
 	 * 0 = unlimited. Always commits at least one finished chunk.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Streaming|CVar Overrides", meta = (DisplayName = "Max Commit Splats Per Frame", ClampMin = "0", UIMin = "0", EditCondition = "bApplyStreamingCVarOverrides"))
-	int32 StreamingMaxCommitSplatsPerFrame = 400000;
+	int32 StreamingMaxCommitSplatsPerFrame = 800000;
 
 	/** Extra coarser LOD levels while the camera is moving (0 = off). Detail recovers after settle. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Streaming|CVar Overrides", meta = (DisplayName = "Motion LOD Bias", ClampMin = "0", ClampMax = "8", UIMin = "0", UIMax = "8", EditCondition = "bApplyStreamingCVarOverrides"))
-	int32 StreamingMotionLodBias = 1;
+	int32 StreamingMotionLodBias = 0;
 
 	/**
 	 * PlayCanvas-style underfill: max coarser LOD steps when optimal is not resident.
-	 * 0 = always request optimal; higher = show/load coarser first, then promote one level at a time.
+	 * 0 = always request optimal LOD; higher = show/load coarser first, then promote step-by-step.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Streaming|CVar Overrides", meta = (DisplayName = "LOD Underfill Limit", ClampMin = "0", ClampMax = "8", UIMin = "0", UIMax = "8", EditCondition = "bApplyStreamingCVarOverrides"))
-	int32 StreamingLodUnderfillLimit = 2;
+	int32 StreamingLodUnderfillLimit = 0;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Streaming|CVar Overrides", meta = (DisplayName = "Debug Draw Octree", EditCondition = "bApplyStreamingCVarOverrides"))
 	bool bStreamingDebugDraw = false;

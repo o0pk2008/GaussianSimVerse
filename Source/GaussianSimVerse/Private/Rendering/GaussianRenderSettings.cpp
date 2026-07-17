@@ -250,31 +250,30 @@ namespace GaussianSimVerse::RenderSettings
 
 	TAutoConsoleVariable<int32> CVarStreamingMaxLoadsPerFrame(
 		TEXT("r.GaussianSimVerse.Streaming.MaxLoadsPerFrame"),
-		8,
-		TEXT("Maximum async chunk loads started per frame."),
+		12,
+		TEXT("Maximum async chunk loads started per frame (clamped by internal concurrency cap)."),
 		ECVF_Default);
 
 	TAutoConsoleVariable<int32> CVarStreamingMaxCommitSplatsPerFrame(
 		TEXT("r.GaussianSimVerse.Streaming.MaxCommitSplatsPerFrame"),
-		400000,
+		800000,
 		TEXT("Base splat commit budget per streaming update (game-thread + GPU upload).\n")
-		TEXT("Runtime scales this: ~0.5x while moving, ~1x when idle/catching up, ~2x bootstrap.\n")
-		TEXT("0 = unlimited. Always commits at least one finished chunk so loading can progress.\n")
-		TEXT("Keep moderate values — large queues of finished chunks cause page-file OOM."),
+		TEXT("Runtime scales this: ~1x while moving, ~2x when idle/catching up, ~2x bootstrap.\n")
+		TEXT("0 = unlimited. Always commits at least one finished chunk so loading can progress."),
 		ECVF_Default);
 
 	TAutoConsoleVariable<int32> CVarStreamingMotionLodBias(
 		TEXT("r.GaussianSimVerse.Streaming.MotionLodBias"),
-		1,
-		TEXT("Extra coarser LOD levels while the camera is moving (0 = off).\n")
-		TEXT("Reduces load/upload spikes during motion; detail recovers after the camera settles."),
+		0,
+		TEXT("Extra coarser LOD levels while the camera is moving (0 = off, default).\n")
+		TEXT("Raise if motion hitch returns on weaker machines."),
 		ECVF_Default);
 
 	TAutoConsoleVariable<int32> CVarStreamingLodUnderfillLimit(
 		TEXT("r.GaussianSimVerse.Streaming.LodUnderfillLimit"),
-		2,
+		0,
 		TEXT("PlayCanvas-style underfill: max coarser LOD steps when optimal is not resident.\n")
-		TEXT("0: Always request optimal LOD\n")
+		TEXT("0: Always request optimal LOD (default; fastest detail)\n")
 		TEXT("1-N: Prefer already-loaded or coarsest-in-range first, then promote one level at a time"),
 		ECVF_Default);
 
