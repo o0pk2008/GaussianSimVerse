@@ -395,8 +395,11 @@ void AGaussianStreamedSceneActor::InitializeStreaming(bool bForceRestart)
 		return;
 	}
 
-	// Always keep dataset pivot in sync (needed for actor-local chunk placement).
-	GaussianScene->DatasetPivot = FVector(StreamedSceneAsset->LodMeta.SceneBounds.Origin);
+	// Placement uses SOG splat coordinates (UE cm after import), NOT lod-meta tree.bound.
+	// Some exports (e.g. large interiors) ship tree.bound in a different scale/frame than SOG means;
+	// SuperSplat still looks centered because it frames actual splat positions. We keep pivot at 0
+	// so ChunkOffset = Asset.Bounds.Origin and the actor at origin matches SuperSplat framing.
+	GaussianScene->DatasetPivot = FVector::ZeroVector;
 	GaussianScene->bHasDatasetPivot = true;
 
 	if (!bForceRestart
@@ -438,7 +441,10 @@ void AGaussianStreamedSceneActor::SnapActorToSceneOrigin()
 		return;
 	}
 
-	const FVector TargetLocation = FVector(StreamedSceneAsset->LodMeta.SceneBounds.Origin);
+	// Do NOT snap to lod-meta SceneBounds.Origin: on some datasets that AABB is inconsistent with
+	// SOG position ranges (model near 0, tree.bound hundreds of meters away). SuperSplat centers
+	// the view on splat data, which is near the authoring origin — place the actor there too.
+	const FVector TargetLocation = FVector::ZeroVector;
 	if (!GetActorLocation().Equals(TargetLocation, 1.0f))
 	{
 		SetActorLocation(TargetLocation, false, nullptr, ETeleportType::TeleportPhysics);
@@ -515,14 +521,9 @@ FVector AGaussianStreamedSceneActor::GetStreamingViewOrigin() const
 #endif
 	}
 
-	// LOD tree bounds are in dataset space. Convert camera into dataset space so streaming still
-	// works after the actor has been translated/rotated (world = Actor * (dataset - DatasetPivot)).
-	if (StreamedSceneAsset)
-	{
-		const FVector Pivot = FVector(StreamedSceneAsset->LodMeta.SceneBounds.Origin);
-		return Pivot + GetActorTransform().InverseTransformPosition(WorldView);
-	}
-	return WorldView;
+	// SOG / chunk placement use dataset coordinates with pivot 0 (same frame as splat means).
+	// Convert world camera into actor/dataset space so LOD still works after moving the actor.
+	return GetActorTransform().InverseTransformPosition(WorldView);
 }
 
 FVector AGaussianStreamedSceneActor::GetStreamingViewDirection() const
