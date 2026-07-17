@@ -42,7 +42,13 @@ public class GaussianSimVerse : ModuleRules
 
 		if (Target.bBuildEditor)
 		{
-			PrivateDependencyModuleNames.Add("UnrealEd");
+			PrivateDependencyModuleNames.AddRange(new string[]
+			{
+				"UnrealEd",
+				"AssetRegistry",
+				"MeshDescription",
+				"StaticMeshDescription",
+			});
 		}
 
 		string RendererPath = Path.Combine(EngineDirectory, "Source", "Runtime", "Renderer");

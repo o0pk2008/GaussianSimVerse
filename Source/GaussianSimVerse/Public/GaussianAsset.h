@@ -78,6 +78,14 @@ public:
 	/** Approximate on-disk / in-memory payload size in megabytes. */
 	float GetPayloadSizeMB() const;
 
+	/**
+	 * Ensure CPU staging is available and sample splat centers for proxy-mesh generation.
+	 * Positions are relative to Bounds.Origin (same frame as rendering for non-streamed assets).
+	 * @param VoxelSizeCm When > 0, only large splats (vs voxel size) get scale shells so centers stay dense.
+	 * @return Number of points appended.
+	 */
+	int32 CollectProxySamplePoints(TArray<FVector>& OutPoints, float MinOpacity, int32 MaxPoints, float VoxelSizeCm = 0.0f) const;
+
 	TSharedPtr<FGaussianGPUBuffer, ESPMode::ThreadSafe> GetGPUBufferShared() const { return GPUBuffer; }
 	FGaussianGPUBuffer* GetGPUBuffer() const { return GPUBuffer.Get(); }
 
