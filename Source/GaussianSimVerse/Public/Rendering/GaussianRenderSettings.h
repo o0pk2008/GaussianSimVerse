@@ -35,6 +35,7 @@ namespace GaussianSimVerse::RenderSettings
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<float> CVarMinSigmaPixels;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarUseResolvedSceneColor;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarPostProcessPass;
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarPreferNonTemporalAA;
 
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarStreamingEnable;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<float> CVarStreamingLoadRadius;
@@ -238,7 +239,14 @@ namespace GaussianSimVerse::RenderSettings
 	/** 0 = BeforeDOF, 1 = AfterDOF */
 	FORCEINLINE int32 GetPostProcessPass()
 	{
-		return FMath::Clamp(CVarPostProcessPass.GetValueOnAnyThread(), 0, 1);
+		// 0 BeforeDOF, 1 AfterDOF, 2 AfterMotionBlur
+		return FMath::Clamp(CVarPostProcessPass.GetValueOnAnyThread(), 0, 2);
+	}
+
+	/** 0 off, 1 force FXAA, 2 force None when gaussians active and view is TAA/TSR. */
+	FORCEINLINE int32 GetPreferNonTemporalAAMode()
+	{
+		return FMath::Clamp(CVarPreferNonTemporalAA.GetValueOnAnyThread(), 0, 2);
 	}
 
 	FORCEINLINE bool UseResolvedSceneColorPath()

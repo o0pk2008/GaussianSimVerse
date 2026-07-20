@@ -26,6 +26,21 @@ enum class EGaussianSHBand : uint8
 	SH3 UMETA(DisplayName = "SH3"),
 };
 
+/**
+ * Proxy mesh fill strategy (PlayCanvas splat-transform collision inspired).
+ * Single Object skips fill; Room seals exterior; Outdoor fills under terrain.
+ */
+UENUM(BlueprintType)
+enum class EGaussianProxySceneType : uint8
+{
+	/** Props / product scans: surface voxels only (skip external-fill and floor-fill). */
+	SingleObject UMETA(DisplayName = "Single Object (skip fill)"),
+	/** Indoor scans: dilate + flood exterior, seal shell (voxel-external-fill). */
+	Room UMETA(DisplayName = "Room (external fill)"),
+	/** Outdoor / terrain: fill solid under first surface per column (voxel-floor-fill). */
+	Outdoor UMETA(DisplayName = "Outdoor (floor fill)"),
+};
+
 constexpr int32 GaussianShRestCoefficientCount = 45;
 constexpr int32 GaussianShDcCoefficientCount = 3;
 constexpr int32 GaussianShCoefficientsPerSplat = GaussianShDcCoefficientCount + GaussianShRestCoefficientCount;

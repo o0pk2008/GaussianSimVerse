@@ -370,6 +370,12 @@ void AGaussianSceneActor::GenerateProxyMeshFromAsset()
 	}
 
 	FGaussianProxyMeshBuildSettings Settings;
+	Settings.SceneType = ProxySceneType;
+	Settings.FillSealSizeCm = FMath::Max(ProxyFillSealSizeCm, 1.0f);
+	Settings.FillSeedPosition = ProxyFillSeedLocal;
+	Settings.bEnableCarve = bProxyEnableCarve;
+	Settings.CarveHeightCm = FMath::Max(ProxyCarveHeightCm, 10.0f);
+	Settings.CarveRadiusCm = FMath::Max(ProxyCarveRadiusCm, 1.0f);
 	Settings.VoxelSizeCm = FMath::Max(ProxyVoxelSizeCm, 1.0f);
 	Settings.MinOpacity = ProxyMinOpacity;
 	Settings.MaxSamplePoints = ProxyMaxSamplePoints;
@@ -409,11 +415,18 @@ void AGaussianSceneActor::GenerateProxyMeshFromAsset()
 
 	const FString AssetName = FString::Printf(TEXT("%s_Proxy"), *GaussianAsset->GetName());
 	FVector LocalOffset = FVector::ZeroVector;
-	UStaticMesh* Mesh = FGaussianProxyMeshGenerator::BuildMeshFromPoints(Points, Settings, AssetName, Error, &LocalOffset);
+	float ActualVoxelCm = Settings.VoxelSizeCm;
+	UStaticMesh* Mesh = FGaussianProxyMeshGenerator::BuildMeshFromPoints(
+		Points, Settings, AssetName, Error, &LocalOffset, &ActualVoxelCm);
 	if (!Mesh)
 	{
 		FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(Error));
 		return;
+	}
+
+	if (ActualVoxelCm > ProxyVoxelSizeCm + 0.5f)
+	{
+		ProxyVoxelSizeCm = ActualVoxelCm;
 	}
 
 	ProxyMesh = Mesh;
@@ -422,13 +435,18 @@ void AGaussianSceneActor::GenerateProxyMeshFromAsset()
 	ApplyProxyMeshSettings();
 
 	const FBoxSphereBounds MeshBounds = Mesh->GetBounds();
+	const FString AutoGrowNote = (ActualVoxelCm > Settings.VoxelSizeCm + 0.5f)
+		? FString::Printf(TEXT("\n(Auto-raised Voxel Size %.1f → %.1f cm so the grid fits this large scene.)"),
+			Settings.VoxelSizeCm, ActualVoxelCm)
+		: FString();
 	FMessageDialog::Open(
 		EAppMsgType::Ok,
 		FText::FromString(FString::Printf(
-			TEXT("Proxy mesh generated: %s\nPoints sampled: %d\nVoxel size: %.1f cm\nSample extent: %s\nMesh extent: %s\nLocal offset: %s\nTip: Scene Depth needs Show Proxy Mesh ON (Gaussians never write depth).\nCustom Depth is a different buffer (Write Custom Depth)."),
+			TEXT("Proxy mesh generated: %s\nPoints sampled: %d\nVoxel size used: %.1f cm%s\nSample extent: %s\nMesh extent: %s\nLocal offset: %s\nTip: Show=off + Custom Depth for beauty; Scene Depth can darken Lit."),
 			*Mesh->GetPathName(),
 			Points.Num(),
-			Settings.VoxelSizeCm,
+			ActualVoxelCm,
+			*AutoGrowNote,
 			*SampleBounds.GetExtent().ToCompactString(),
 			*FVector(MeshBounds.BoxExtent).ToCompactString(),
 			*ProxyMeshLocalOffset.ToCompactString())));

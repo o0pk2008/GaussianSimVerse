@@ -44,6 +44,31 @@ public:
 	void GenerateProxyMeshFromAsset();
 #endif
 
+	/**
+	 * PlayCanvas splat-transform style scene class:
+	 * Single Object = surface only; Room = external fill; Outdoor = floor fill.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Proxy", meta = (DisplayName = "Scene Type", DisplayPriority = 3))
+	EGaussianProxySceneType ProxySceneType = EGaussianProxySceneType::SingleObject;
+
+	/** Room/Outdoor fill seal size (cm). Room dilates before exterior flood; Outdoor floor neighborhood. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Proxy", meta = (ClampMin = "1.0", UIMin = "1.0", DisplayName = "Fill Seal Size (cm)", EditCondition = "ProxySceneType != EGaussianProxySceneType::SingleObject", EditConditionHides, DisplayPriority = 3))
+	float ProxyFillSealSizeCm = 160.0f;
+
+	/** Room/Outdoor seed (local). Room fill must be enclosed; carve starts here. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Proxy", meta = (DisplayName = "Fill Seed (Local)", EditCondition = "ProxySceneType != EGaussianProxySceneType::SingleObject", EditConditionHides, DisplayPriority = 3))
+	FVector ProxyFillSeedLocal = FVector(0.0f, 0.0f, 100.0f);
+
+	/** After fill, carve navigable space with a capsule and invert to a clean collision shell. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Proxy", meta = (DisplayName = "Enable Carve", EditCondition = "ProxySceneType != EGaussianProxySceneType::SingleObject", EditConditionHides, DisplayPriority = 3))
+	bool bProxyEnableCarve = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Proxy", meta = (ClampMin = "10.0", UIMin = "10.0", DisplayName = "Carve Height (cm)", EditCondition = "bProxyEnableCarve && ProxySceneType != EGaussianProxySceneType::SingleObject", EditConditionHides, DisplayPriority = 3))
+	float ProxyCarveHeightCm = 160.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Proxy", meta = (ClampMin = "1.0", UIMin = "1.0", DisplayName = "Carve Radius (cm)", EditCondition = "bProxyEnableCarve && ProxySceneType != EGaussianProxySceneType::SingleObject", EditConditionHides, DisplayPriority = 3))
+	float ProxyCarveRadiusCm = 20.0f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Proxy", meta = (ClampMin = "1.0", UIMin = "1.0", DisplayName = "Voxel Size (cm)", DisplayPriority = 4))
 	float ProxyVoxelSizeCm = 2.0f;
 

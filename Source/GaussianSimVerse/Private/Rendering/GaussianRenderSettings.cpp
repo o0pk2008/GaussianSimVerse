@@ -209,11 +209,22 @@ namespace GaussianSimVerse::RenderSettings
 
 	TAutoConsoleVariable<int32> CVarPostProcessPass(
 		TEXT("r.GaussianSimVerse.PostProcessPass"),
-		1,
+		2,
 		TEXT("Which post-process pass injects Gaussian splats.\n")
-		TEXT("0: BeforeDOF\n")
-		TEXT("1: AfterDOF (default)"),
+		TEXT("0: BeforeDOF (can ghost under TSR/TAA)\n")
+		TEXT("1: AfterDOF (still affected by Motion Blur)\n")
+		TEXT("2: AfterMotionBlur (default — most stable while moving; like LUMA non-No_TAA path)"),
 		ECVF_RenderThreadSafe);
+
+	TAutoConsoleVariable<int32> CVarPreferNonTemporalAA(
+		TEXT("r.GaussianSimVerse.PreferNonTemporalAA"),
+		1,
+		TEXT("When Gaussian scenes are active, force non-temporal AA on the view for stable camera motion.\n")
+		TEXT("TAA/TSR reproject scene color without splat velocity and look like blur/ghosting while moving.\n")
+		TEXT("0: Off (use project AA as-is)\n")
+		TEXT("1: Force FXAA when view uses TAA/TSR (default)\n")
+		TEXT("2: Force AAM_None when view uses TAA/TSR"),
+		ECVF_Default);
 
 	TAutoConsoleVariable<int32> CVarStreamingEnable(
 		TEXT("r.GaussianSimVerse.Streaming.Enable"),
