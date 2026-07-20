@@ -75,7 +75,10 @@ void FAssetTypeActions_GaussianAsset::PlaceActorsInLevel(const TArray<TWeakObjec
 			continue;
 		}
 
-		const FVector SpawnLocation = FVector(Asset->Bounds.Origin) + FVector(OffsetIndex * 200.0, 0.0, 0.0);
+		// Dataset-coordinate SOGs (new imports) spawn at origin like streamed LOD actors.
+		const FVector SpawnLocation = (Asset->bUsesDatasetCoordinates
+			? FVector::ZeroVector
+			: FVector(Asset->Bounds.Origin)) + FVector(OffsetIndex * 200.0, 0.0, 0.0);
 		++OffsetIndex;
 
 		AActor* SpawnedActor = ActorSubsystem->SpawnActorFromClass(

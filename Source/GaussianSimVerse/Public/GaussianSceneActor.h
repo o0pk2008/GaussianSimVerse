@@ -72,7 +72,25 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Proxy", meta = (ClampMin = "1.0", UIMin = "1.0", DisplayName = "Voxel Size (cm)", DisplayPriority = 4))
 	float ProxyVoxelSizeCm = 2.0f;
 
-	/** Ignore very faint splats. Keep low (~0.05) for denser silhouette matching the Gaussian. */
+	/**
+	 * Voxel Faces = blocky exact cubes.
+	 * Surface Smooth = same faces + Taubin/Laplacian (recommended when you want less blocky).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Proxy", meta = (DisplayName = "Mesh Mode", DisplayPriority = 4))
+	EGaussianProxyMeshMode ProxyMeshMode = EGaussianProxyMeshMode::Faces;
+
+	/** Taubin smooth iterations when Mesh Mode = Surface Smooth (5–12 typical). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Proxy", meta = (ClampMin = "0", ClampMax = "40", DisplayName = "Smooth Iterations", EditCondition = "ProxyMeshMode == EGaussianProxyMeshMode::Smooth", EditConditionHides, DisplayPriority = 4))
+	int32 ProxySmoothIterations = 8;
+
+	/**
+	 * If requested Voxel Size would exceed grid limits, raise it automatically
+	 * (UI value is updated to the size actually used). Disable to get an error instead.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Proxy", meta = (DisplayName = "Auto Grow Voxel Size", DisplayPriority = 4))
+	bool bProxyAutoGrowVoxelSize = true;
+
+	/** Ignore very faint splats. Outdoor clutter: try 0.08–0.15. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Proxy", meta = (ClampMin = "0.0", ClampMax = "1.0", DisplayName = "Min Opacity", DisplayPriority = 5))
 	float ProxyMinOpacity = 0.05f;
 
@@ -87,9 +105,26 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Proxy", meta = (ClampMin = "0", ClampMax = "3", DisplayName = "Shrink Rings", DisplayPriority = 8))
 	int32 ProxyShrinkRings = 0;
 
-	/** Cells need this many sample hits to become solid (1 = densest silhouette). */
+	/**
+	 * Cells need this many sample hits to become solid.
+	 * Outdoor fringe noise: use 2–3 to drop sparse floaters before floor-fill.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Proxy", meta = (ClampMin = "1", ClampMax = "8", DisplayName = "Min Hits Per Voxel", DisplayPriority = 9))
 	int32 ProxyMinHitsPerVoxel = 1;
+
+	/**
+	 * Drop solid islands smaller than this many voxels (0 = off).
+	 * Outdoor forests: 64–256 removes floating Gaussian clutter before floor pillars form.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Proxy", meta = (ClampMin = "0", ClampMax = "100000", DisplayName = "Min Solid Island Voxels", DisplayPriority = 9))
+	int32 ProxyMinSolidIslandVoxels = 64;
+
+	/**
+	 * Keep only the largest solid component (or the one near Fill Seed).
+	 * Outdoor: on after floor-fill → main terrain+cabin; off if you need every distant tree.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Proxy", meta = (DisplayName = "Keep Primary Solid Only", DisplayPriority = 9))
+	bool bProxyKeepPrimarySolid = true;
 
 	/**
 	 * Draw proxy color in the main pass (what you see in Lit view).

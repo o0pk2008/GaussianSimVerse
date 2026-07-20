@@ -45,6 +45,32 @@ struct FGaussianProxyMeshBuildSettings
 	/** Carve capsule radius in cm (agent radius; default 20). */
 	float CarveRadiusCm = 20.0f;
 
+	/** Faces = blocky voxels; Smooth = faces + Laplacian/Taubin (recommended smooth). */
+	EGaussianProxyMeshMode MeshMode = EGaussianProxyMeshMode::Faces;
+
+	/**
+	 * Surface Smooth iterations (Taubin pairs). 0 = no smooth even in Smooth mode.
+	 * 5–12 is typical; higher = rounder but more shrink/melt on thin shells.
+	 */
+	int32 SmoothIterations = 8;
+
+	/**
+	 * Laplacian step size in [0,1]. ~0.5 with Taubin negative pass limits shrinkage.
+	 */
+	float SmoothLambda = 0.5f;
+
+	/**
+	 * Drop solid islands smaller than this many voxels (PlayCanvas floater cleanup intent).
+	 * 0 = off. Outdoor forests often need 32–256.
+	 */
+	int32 MinSolidIslandVoxels = 64;
+
+	/**
+	 * After island filter: keep only the largest solid component, or the one containing FillSeed
+	 * when seed falls inside solid / nearest component (removes distant clutter clouds).
+	 */
+	bool bKeepPrimarySolidComponent = true;
+
 	/** Ignore splats with opacity below this. Low (~0.05) keeps a denser silhouette. */
 	float MinOpacity = 0.05f;
 
@@ -73,12 +99,16 @@ struct FGaussianProxyMeshBuildSettings
 	bool bCenterMeshAtOrigin = false;
 
 	/**
-	 * If the requested VoxelSize would create a grid larger than MaxGridDim, automatically raise
-	 * VoxelSize so large LOD/outdoor scenes still produce a proxy instead of failing.
+	 * If the requested VoxelSize would create a grid larger than MaxGridDim / cell budget,
+	 * automatically raise VoxelSize (and the actor UI may sync to the new value).
+	 * Disable to fail with an error instead of growing.
 	 */
 	bool bAutoGrowVoxelSize = true;
 
-	/** Soft cap per axis for the occupancy grid (memory / editor responsiveness). */
+	/**
+	 * Soft cap per axis for the occupancy grid index space.
+	 * Single Object uses a higher effective cap (sparse surface) so finer voxels are allowed.
+	 */
 	int32 MaxGridDim = 1024;
 
 	/** Package path without asset name, e.g. /Game/MyScene (defaults next to source asset). */

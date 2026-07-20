@@ -567,11 +567,16 @@ void AGaussianStreamedSceneActor::GenerateProxyMeshFromDataset()
 	Settings.CarveHeightCm = FMath::Max(ProxyCarveHeightCm, 10.0f);
 	Settings.CarveRadiusCm = FMath::Max(ProxyCarveRadiusCm, 1.0f);
 	Settings.VoxelSizeCm = FMath::Max(ProxyVoxelSizeCm, 1.0f);
+	Settings.MeshMode = ProxyMeshMode;
+	Settings.SmoothIterations = ProxySmoothIterations;
+	Settings.bAutoGrowVoxelSize = bProxyAutoGrowVoxelSize;
 	Settings.MinOpacity = ProxyMinOpacity;
 	Settings.MaxSamplePoints = ProxyMaxSamplePoints;
 	Settings.DilateRings = ProxyDilateRings;
 	Settings.ShrinkRings = ProxyShrinkRings;
 	Settings.MinHitsPerVoxel = ProxyMinHitsPerVoxel;
+	Settings.MinSolidIslandVoxels = ProxyMinSolidIslandVoxels;
+	Settings.bKeepPrimarySolidComponent = bProxyKeepPrimarySolid;
 	// Keep dataset/actor-local space so mesh and Gaussian share one frame (asset + level).
 	Settings.bCenterMeshAtOrigin = false;
 	// Save next to the streamed scene asset package for easier content management.
@@ -628,13 +633,16 @@ void AGaussianStreamedSceneActor::GenerateProxyMeshFromDataset()
 
 	const FBoxSphereBounds MeshBounds = Mesh->GetBounds();
 	const FString AutoGrowNote = (ActualVoxelCm > Settings.VoxelSizeCm + 0.5f)
-		? FString::Printf(TEXT("\n(Auto-raised Voxel Size %.1f → %.1f cm so the grid fits this large scene.)"),
+		? FString::Printf(
+			TEXT("\n(Auto-raised Voxel Size %.1f → %.1f cm: scene AABB too large for requested size.\n")
+			TEXT(" Single Object max ~2048 cells/axis; Room/Outdoor also has dense cell budget.\n")
+			TEXT(" Uncheck Auto Grow Voxel Size to fail instead of growing.)"),
 			Settings.VoxelSizeCm, ActualVoxelCm)
 		: FString();
 	FMessageDialog::Open(
 		EAppMsgType::Ok,
 		FText::FromString(FString::Printf(
-			TEXT("Proxy mesh generated: %s\nPoints sampled: %d\nVoxel size used: %.1f cm%s\nSample extent: %s\nMesh extent: %s\nLocal offset: %s\nTip: Show=off + Custom Depth for beauty; Scene Depth can darken Lit."),
+			TEXT("Proxy mesh generated: %s\nPoints sampled: %d\nVoxel size used: %.1f cm%s\nSample extent: %s\nMesh extent: %s\nLocal offset: %s\nTip: Mesh Mode Surface Smooth = Faces + Laplacian; Show=off + Custom Depth for beauty."),
 			*Mesh->GetPathName(),
 			Points.Num(),
 			ActualVoxelCm,

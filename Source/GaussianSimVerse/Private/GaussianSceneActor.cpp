@@ -276,7 +276,11 @@ void AGaussianSceneActor::SnapActorToAssetOrigin()
 		return;
 	}
 
-	const FVector TargetLocation = FVector(GaussianAsset->Bounds.Origin);
+	// Dataset-coordinate assets match streamed LOD: actor at world origin, splats absolute.
+	// Legacy centered assets: actor at Bounds.Origin (positions stored relative to that point).
+	const FVector TargetLocation = GaussianAsset->bUsesDatasetCoordinates
+		? FVector::ZeroVector
+		: FVector(GaussianAsset->Bounds.Origin);
 	if (!GetActorLocation().Equals(TargetLocation, 1.0f))
 	{
 		SetActorLocation(TargetLocation, false, nullptr, ETeleportType::TeleportPhysics);
@@ -377,11 +381,16 @@ void AGaussianSceneActor::GenerateProxyMeshFromAsset()
 	Settings.CarveHeightCm = FMath::Max(ProxyCarveHeightCm, 10.0f);
 	Settings.CarveRadiusCm = FMath::Max(ProxyCarveRadiusCm, 1.0f);
 	Settings.VoxelSizeCm = FMath::Max(ProxyVoxelSizeCm, 1.0f);
+	Settings.MeshMode = ProxyMeshMode;
+	Settings.SmoothIterations = ProxySmoothIterations;
+	Settings.bAutoGrowVoxelSize = bProxyAutoGrowVoxelSize;
 	Settings.MinOpacity = ProxyMinOpacity;
 	Settings.MaxSamplePoints = ProxyMaxSamplePoints;
 	Settings.DilateRings = ProxyDilateRings;
 	Settings.ShrinkRings = ProxyShrinkRings;
 	Settings.MinHitsPerVoxel = ProxyMinHitsPerVoxel;
+	Settings.MinSolidIslandVoxels = ProxyMinSolidIslandVoxels;
+	Settings.bKeepPrimarySolidComponent = bProxyKeepPrimarySolid;
 	// Keep Gaussian actor-local space so asset preview matches the splat cloud frame.
 	Settings.bCenterMeshAtOrigin = false;
 	// Save next to the Gaussian asset package for easier content management.
@@ -436,13 +445,16 @@ void AGaussianSceneActor::GenerateProxyMeshFromAsset()
 
 	const FBoxSphereBounds MeshBounds = Mesh->GetBounds();
 	const FString AutoGrowNote = (ActualVoxelCm > Settings.VoxelSizeCm + 0.5f)
-		? FString::Printf(TEXT("\n(Auto-raised Voxel Size %.1f → %.1f cm so the grid fits this large scene.)"),
+		? FString::Printf(
+			TEXT("\n(Auto-raised Voxel Size %.1f → %.1f cm: scene AABB too large for requested size.\n")
+			TEXT(" Single Object max ~2048 cells/axis; Room/Outdoor also has dense cell budget.\n")
+			TEXT(" Uncheck Auto Grow Voxel Size to fail instead of growing.)"),
 			Settings.VoxelSizeCm, ActualVoxelCm)
 		: FString();
 	FMessageDialog::Open(
 		EAppMsgType::Ok,
 		FText::FromString(FString::Printf(
-			TEXT("Proxy mesh generated: %s\nPoints sampled: %d\nVoxel size used: %.1f cm%s\nSample extent: %s\nMesh extent: %s\nLocal offset: %s\nTip: Show=off + Custom Depth for beauty; Scene Depth can darken Lit."),
+			TEXT("Proxy mesh generated: %s\nPoints sampled: %d\nVoxel size used: %.1f cm%s\nSample extent: %s\nMesh extent: %s\nLocal offset: %s\nTip: Mesh Mode Surface Smooth = Faces + Laplacian; Show=off + Custom Depth for beauty."),
 			*Mesh->GetPathName(),
 			Points.Num(),
 			ActualVoxelCm,
@@ -526,16 +538,19 @@ void AGaussianSceneActor::UpdateBoundsVisual()
 		return;
 	}
 
-	// Non-streamed splats are centered at actor (Bounds.Origin); local AABB is about origin.
+	// Absolute dataset coords: box around Bounds.Origin. Legacy centered: box around actor (0).
 	FVector Extent(50.0f);
+	FVector BoxLocalOrigin = FVector::ZeroVector;
 	if (GaussianAsset && !GaussianAsset->Bounds.Extent.IsNearlyZero())
 	{
-		Extent = FVector(GaussianAsset->Bounds.Extent);
-		// Tiny assets still need a pickable volume.
-		Extent = Extent.ComponentMax(FVector(10.0f));
+		Extent = FVector(GaussianAsset->Bounds.Extent).ComponentMax(FVector(10.0f));
+		if (GaussianAsset->bUsesDatasetCoordinates)
+		{
+			BoxLocalOrigin = FVector(GaussianAsset->Bounds.Origin);
+		}
 	}
 
-	BoundsVisual->SetRelativeLocation(FVector::ZeroVector);
+	BoundsVisual->SetRelativeLocation(BoxLocalOrigin);
 	BoundsVisual->SetBoxExtent(Extent, true);
 	BoundsVisual->SetHiddenInGame(true);
 	BoundsVisual->SetVisibility(true);

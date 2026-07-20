@@ -41,6 +41,19 @@ enum class EGaussianProxySceneType : uint8
 	Outdoor UMETA(DisplayName = "Outdoor (floor fill)"),
 };
 
+/** How the solid voxel set is converted to a StaticMesh. */
+UENUM(BlueprintType)
+enum class EGaussianProxyMeshMode : uint8
+{
+	/** Axis-aligned exposed voxel faces (exact volume, blocky). Best for Single Object. */
+	Faces UMETA(DisplayName = "Voxel Faces"),
+	/**
+	 * Exposed faces + Taubin/Laplacian vertex smooth (recommended "smooth" path).
+	 * Prefer this over marching cubes on thin Gaussian shells.
+	 */
+	Smooth UMETA(DisplayName = "Surface Smooth (Laplacian)"),
+};
+
 constexpr int32 GaussianShRestCoefficientCount = 45;
 constexpr int32 GaussianShDcCoefficientCount = 3;
 constexpr int32 GaussianShCoefficientsPerSplat = GaussianShDcCoefficientCount + GaussianShRestCoefficientCount;

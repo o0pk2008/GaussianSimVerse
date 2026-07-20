@@ -244,18 +244,18 @@ void UGaussianAsset::SetStagingData(
 	Bounds = ComputeBounds(InStagingData);
 	ImportedShDegree = FMath::Clamp(InImportedShDegree, 0, 3);
 
-	TArray<FGaussianSplatData> CenteredData = InStagingData;
-	const FVector3f WorldCenter = Bounds.Origin;
-	for (FGaussianSplatData& Splat : CenteredData)
-	{
-		Splat.Position -= WorldCenter;
-	}
+	// Keep absolute dataset coordinates (SuperSplat / streamed LOD with DatasetPivot=0).
+	// Legacy path subtracted Bounds.Origin so the actor could snap to the AABB center; on large
+	// scenes outliers pull that center far from the authored content, so a full SOG and a
+	// streamed LOD of the same capture no longer line up.
+	TArray<FGaussianSplatData> StoredData = InStagingData;
+	bUsesDatasetCoordinates = true;
 
-	EncodeStagingToBulk(CenteredData);
+	EncodeStagingToBulk(StoredData);
 	EncodeShCoefficientsToBulk(InShCoefficients);
-	GaussianCount = CenteredData.Num();
+	GaussianCount = StoredData.Num();
 
-	StagingCache = MoveTemp(CenteredData);
+	StagingCache = MoveTemp(StoredData);
 	bStagingCacheLoaded = true;
 	ShCoefficientCache = MoveTemp(InShCoefficients);
 	bShCoefficientCacheLoaded = true;

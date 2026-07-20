@@ -29,9 +29,22 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Gaussian")
 	EGaussianSourceFormat SourceFormat = EGaussianSourceFormat::Unknown;
 
-	/** World-space placement center. Splat positions are stored relative to this point. */
+	/**
+	 * Dataset AABB (origin = center, extent = half-size).
+	 * When bUsesDatasetCoordinates is false (legacy), splat positions in bulk are relative to Origin
+	 * and the scene actor snaps to Origin.
+	 * When true (default for new imports), positions are absolute SuperSplat/dataset coordinates
+	 * (same frame as streamed LOD with DatasetPivot=0) and the actor stays at the world origin.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Gaussian")
 	FGaussianBounds Bounds;
+
+	/**
+	 * True: bulk positions are in dataset/UE absolute frame (match streamed LOD / SuperSplat).
+	 * False: legacy centered storage (positions relative to Bounds.Origin).
+	 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Gaussian")
+	bool bUsesDatasetCoordinates = false;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Gaussian|SOG")
 	TArray<TObjectPtr<class UTexture2D>> SourceTextures;
@@ -80,7 +93,7 @@ public:
 
 	/**
 	 * Ensure CPU staging is available and sample splat centers for proxy-mesh generation.
-	 * Positions are relative to Bounds.Origin (same frame as rendering for non-streamed assets).
+	 * Positions match rendering frame (dataset absolute if bUsesDatasetCoordinates, else relative to Bounds.Origin).
 	 * @param VoxelSizeCm When > 0, only large splats (vs voxel size) get scale shells so centers stay dense.
 	 * @return Number of points appended.
 	 */
