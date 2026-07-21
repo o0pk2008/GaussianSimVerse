@@ -27,17 +27,34 @@ void FGaussianGPUBuffer::SetCPUDataFromStaging(
 	const TArray<float>& ShCoefficients,
 	int32 InImportedShDegree)
 {
+	// Convert outside the lock (read-only source). All mutation of this buffer is under DataLock
+	// so game-thread re-init cannot race render-thread Commit/Upload (was AV when dragging UI).
 	TArray<FGaussianSplatGPU> Converted;
 	GaussianGPU::ConvertSplatDataArray(StagingData, Converted);
-	ImportedShDegree = static_cast<uint32>(FMath::Clamp(InImportedShDegree, 0, 3));
-	ShCoefficientCPUData = ShCoefficients;
-	if (StagingData.Num() > 0
-		&& ShCoefficientCPUData.Num() != StagingData.Num() * GaussianShCoefficientsPerSplat)
+
+	TArray<float> ShCopy;
+	const int32 ExpectedSh = StagingData.Num() * GaussianShCoefficientsPerSplat;
+	uint32 NewImportedShDegree = static_cast<uint32>(FMath::Clamp(InImportedShDegree, 0, 3));
+	if (StagingData.Num() > 0 && ShCoefficients.Num() == ExpectedSh)
 	{
-		ShCoefficientCPUData.Reset();
-		ImportedShDegree = 0;
+		ShCopy = ShCoefficients;
 	}
-	SetCPUData(MoveTemp(Converted));
+	else
+	{
+		NewImportedShDegree = 0;
+	}
+
+	TArray<FVector4f> Positions;
+	GaussianGPU::BuildPositionBuffer(Converted, Positions);
+
+	FScopeLock Lock(&DataLock);
+	SplatCPUData = MoveTemp(Converted);
+	PositionCPUData = MoveTemp(Positions);
+	ShCoefficientCPUData = MoveTemp(ShCopy);
+	ImportedShDegree = NewImportedShDegree;
+	NumGaussians = static_cast<uint32>(SplatCPUData.Num());
+	bHasShCpuData = (ShCoefficientCPUData.Num() == static_cast<int32>(NumGaussians * GaussianShCoefficientsPerSplat)) ? 1u : 0u;
+	bDirty = true;
 }
 
 void FGaussianGPUBuffer::SetCPUDataPrepared(

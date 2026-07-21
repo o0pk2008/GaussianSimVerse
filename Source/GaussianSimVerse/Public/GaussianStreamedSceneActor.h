@@ -213,6 +213,42 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Gaussian|Proxy|Depth Of Field")
 	void SyncDepthOfFieldToScene();
 
+	// --- Relighting (PlayCanvas-style) ---
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Relighting|Global", meta = (DisplayName = "Enable Relighting", DisplayPriority = 30))
+	bool bEnableRelighting = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Relighting|Global", meta = (ClampMin = "0.0", ClampMax = "1.0", UIMin = "0.0", UIMax = "1.0", DisplayName = "Blend", EditCondition = "bEnableRelighting", DisplayPriority = 31))
+	float RelightBlend = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Relighting|Global", meta = (ClampMin = "0.0", ClampMax = "8.0", UIMin = "0.0", UIMax = "8.0", DisplayName = "Exposure", EditCondition = "bEnableRelighting", DisplayPriority = 32))
+	float RelightExposure = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Relighting|Global", meta = (ClampMin = "0.0", ClampMax = "8.0", UIMin = "0.0", UIMax = "8.0", DisplayName = "Brightness", EditCondition = "bEnableRelighting", DisplayPriority = 33))
+	float RelightBrightness = 2.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Relighting|Global", meta = (ClampMin = "0.0", ClampMax = "8.0", UIMin = "0.0", UIMax = "8.0", DisplayName = "Background", EditCondition = "bEnableRelighting", DisplayPriority = 34))
+	float RelightBackground = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Relighting|Global", meta = (ClampMin = "0.25", ClampMax = "1.0", UIMin = "0.25", UIMax = "1.0", DisplayName = "Texture Scale", EditCondition = "bEnableRelighting", DisplayPriority = 35))
+	float RelightTextureScale = 0.5f;
+
+	/** Bottom-right window: lit proxy mesh only (cyan border). Main view stays gaussians. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Relighting|Global", meta = (DisplayName = "Debug", EditCondition = "bEnableRelighting", DisplayPriority = 36))
+	bool bRelightDebug = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Relighting|Environment", meta = (DisplayName = "Skydome", EditCondition = "bEnableRelighting", DisplayPriority = 40))
+	TObjectPtr<class UTextureCube> RelightSkydome;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Relighting|Environment", meta = (ClampMin = "0.0", ClampMax = "16.0", UIMin = "0.0", UIMax = "16.0", DisplayName = "Exposure", EditCondition = "bEnableRelighting", DisplayPriority = 41))
+	float RelightEnvExposure = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Relighting|Environment", meta = (ClampMin = "0.0", ClampMax = "360.0", UIMin = "0.0", UIMax = "360.0", DisplayName = "Rotation", EditCondition = "bEnableRelighting", DisplayPriority = 42))
+	float RelightEnvRotation = 0.0f;
+
+	UFUNCTION(BlueprintCallable, Category = "Gaussian|Relighting")
+	void UpdateRelighting();
+
 protected:
 	/** Whether this actor currently holds a Proxy-DOF AO-suppress refcount. */
 	bool bProxyDofMitigationHeld = false;
@@ -285,6 +321,25 @@ public:
 	UPROPERTY()
 	TObjectPtr<class UStaticMeshComponent> ProxyMeshComponent;
 
+	UPROPERTY(Transient)
+	TObjectPtr<class USceneCaptureComponent2D> RelightCapture;
+
+	UPROPERTY(Transient)
+	TObjectPtr<class UTextureRenderTarget2D> RelightRenderTarget;
+
+	UPROPERTY(Transient)
+	TObjectPtr<class USkyLightComponent> RelightSkyLight;
+
+	UPROPERTY(Transient)
+	TObjectPtr<class UMaterialInstanceDynamic> RelightProxyMaterial;
+
+	/** Invisible main-view mesh: casts sun shadows onto ground / other actors. */
+	UPROPERTY(Transient)
+	TObjectPtr<class UStaticMeshComponent> RelightShadowProxy;
+
+	/** Primitives we flipped to CastHiddenShadow while relighting (restored on disable). */
+	TArray<TWeakObjectPtr<UPrimitiveComponent>> RelightHiddenShadowCasters;
+
 protected:
 	virtual void PostRegisterAllComponents() override;
 	virtual void PostUnregisterAllComponents() override;
@@ -292,6 +347,8 @@ protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaSeconds) override;
+	/** Keep SceneCapture camera in sync while editing (no PIE). */
+	virtual bool ShouldTickIfViewportsOnly() const override;
 	virtual void BeginDestroy() override;
 	virtual void SetActorHiddenInGame(bool bNewHidden) override;
 #if WITH_EDITOR

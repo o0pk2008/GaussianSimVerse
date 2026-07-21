@@ -15,12 +15,15 @@
 #include "SceneTextures.h"
 #include "SystemTextures.h"
 #include "Rendering/GaussianShaderTypes.h"
+#include "Rendering/GaussianRelighting.h"
 #include "PixelShaderUtils.h"
 #include "GlobalShader.h"
 #include "PipelineStateCache.h"
 #include "RHIStaticStates.h"
 #include "CommonRenderResources.h"
 #include "RenderGraphUtils.h"
+#include "Engine/TextureRenderTarget2D.h"
+#include "TextureResource.h"
 
 FGaussianRenderer& FGaussianRenderer::Get()
 {
@@ -365,6 +368,19 @@ bool FGaussianRenderer::WantsPluginDepthOfField() const
 	return false;
 }
 
+void FGaussianRenderer::SetRelightFrameState_GameThread(const FGaussianRelightFrameState& State)
+{
+	check(IsInGameThread());
+	FScopeLock Lock(&SceneLock);
+	RelightFrameState = State;
+}
+
+FGaussianRelightFrameState FGaussianRenderer::GetRelightFrameState() const
+{
+	FScopeLock Lock(&SceneLock);
+	return RelightFrameState;
+}
+
 bool FGaussianRenderer::HasActiveScenes() const
 {
 	FScopeLock Lock(&SceneLock);
@@ -492,6 +508,34 @@ void FGaussianRenderer::RenderGaussiansForView(
 	PassInputs.bExportSoftDepthForDof = WantsCineCameraDepthOfField();
 	PassInputs.OutSoftDepthDeviceZ = PassInputs.bExportSoftDepthForDof ? &SoftDepthBits : nullptr;
 	PassInputs.InvDeviceZToWorldZTransform = View.InvDeviceZToWorldZTransform;
+
+	// PlayCanvas-style relight: lit proxy RT from SceneCapture, sampled in CompositeCS.
+	{
+		const FGaussianRelightFrameState Relight = GetRelightFrameState();
+		PassInputs.bRelightEnabled = false;
+		PassInputs.bRelightDebug = Relight.bDebug;
+		PassInputs.RelightBlend = Relight.Blend;
+		PassInputs.RelightExposure = Relight.Exposure;
+		PassInputs.RelightBrightness = Relight.Brightness;
+		PassInputs.RelightBackground = Relight.Background;
+		PassInputs.RelightTexture = GSystemTextures.GetBlackDummy(GraphBuilder);
+
+		if (Relight.bEnabled)
+		{
+			if (UTextureRenderTarget2D* RT = Relight.RenderTarget.Get())
+			{
+				if (FTextureRenderTargetResource* RTRes = RT->GetRenderTargetResource())
+				{
+					if (FRHITexture* RHI = RTRes->GetRenderTargetTexture())
+					{
+						PassInputs.RelightTexture = GraphBuilder.RegisterExternalTexture(
+							CreateRenderTarget(RHI, TEXT("Gaussian.RelightMap")));
+						PassInputs.bRelightEnabled = true;
+					}
+				}
+			}
+		}
+	}
 	// Always try depth occlusion so regular actors (cubes, etc.) can hide gaussians behind them.
 	// Proxy DOF merges CustomDepth into SceneDepth for CoC — exclude those pixels via Custom Stencil
 	// so the proxy shell does not self-occlude / black-hole the gaussians.

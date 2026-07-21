@@ -1,19 +1,69 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 // Composite Gaussian overlay onto resolved scene color (single pass, no MSAA corruption).
+// Optional PlayCanvas-style relighting: multiply overlay by screen-aligned lit-proxy map.
 
 #include "/Engine/Public/Platform.ush"
 
 float4 ViewRect;
 int2 SceneColorOffset;
+uint bRelightEnabled;
+uint bRelightDebug;
+float RelightBlend;
+float RelightExposure;
+float RelightBrightness;
+float RelightBackground;
 Texture2D<float4> SceneColorTexture;
 Texture2D<float4> OverlayTexture;
+Texture2D<float4> RelightTexture;
+SamplerState RelightSampler;
 RWTexture2D<float4> RWSceneColor;
+
+float Luma(float3 C)
+{
+	return dot(C, float3(0.2126, 0.7152, 0.0722));
+}
+
+// Lit proxy map → modulate factor. Coverage from alpha OR luminance.
+void SampleRelight(float2 Uv, out float3 OutFactor, out float OutCoverage, out float3 OutLitRgb)
+{
+	const float4 Lit = RelightTexture.SampleLevel(RelightSampler, Uv, 0);
+	OutLitRgb = max(Lit.rgb, 0.0);
+	float Coverage = saturate(Lit.a);
+	const float Lum = Luma(OutLitRgb);
+	if (Coverage < 1e-3 && Lum > 1e-4)
+	{
+		Coverage = 1.0;
+	}
+	if (Lum < 1e-5 && Lit.a < 0.5)
+	{
+		Coverage = 0.0;
+	}
+	OutCoverage = Coverage;
+	const float3 LitFactor = OutLitRgb * RelightBrightness * RelightExposure;
+	OutFactor = lerp(float3(RelightBackground, RelightBackground, RelightBackground), LitFactor, Coverage);
+}
+
+float3 ApplyRelightFactor(float3 PremulRgb, float Alpha, float2 Uv)
+{
+	if (bRelightEnabled == 0u || Alpha <= 1e-4)
+	{
+		return PremulRgb;
+	}
+
+	float3 Factor;
+	float Coverage;
+	float3 LitRgb;
+	SampleRelight(Uv, Factor, Coverage, LitRgb);
+	const float3 Relit = PremulRgb * Factor;
+	return lerp(PremulRgb, Relit, saturate(RelightBlend));
+}
 
 [numthreads(8, 8, 1)]
 void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 {
 	const int2 LocalPixel = int2(DispatchThreadId.xy);
-	const int2 ViewMax = int2(ViewRect.zw) - int2(1, 1);
+	const int2 ViewSize = int2(ViewRect.zw);
+	const int2 ViewMax = ViewSize - int2(1, 1);
 	if (LocalPixel.x < 0 || LocalPixel.y < 0 || LocalPixel.x > ViewMax.x || LocalPixel.y > ViewMax.y)
 	{
 		return;
@@ -22,13 +72,56 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 	const int2 ScenePixel = LocalPixel + SceneColorOffset;
 	const float4 Scene = SceneColorTexture[ScenePixel];
 	const float4 Overlay = OverlayTexture[LocalPixel];
+	const float2 Uv = (float2(LocalPixel) + 0.5) / max(float2(ViewSize), float2(1.0, 1.0));
+
+	// --- Normal gaussian composite (with optional relight modulate) ---
 	const float Alpha = saturate(Overlay.a);
-	if (Alpha <= (1.0 / 255.0))
+	float3 OutRgb = Scene.rgb;
+	if (Alpha > (1.0 / 255.0))
 	{
-		return;
+		const float3 Premul = ApplyRelightFactor(Overlay.rgb, Alpha, Uv);
+		OutRgb = Premul + Scene.rgb * (1.0 - Alpha);
 	}
 
-	// Overlay stores premultiplied RGB from the raster pass.
-	const float3 OutRgb = Overlay.rgb + Scene.rgb * (1.0 - Alpha);
-	RWSceneColor[ScenePixel] = float4(OutRgb, Scene.a);
+	// Debug: bottom-right inset of lit-proxy mesh only (does NOT replace the whole frame).
+	if (bRelightDebug != 0u && bRelightEnabled != 0u)
+	{
+		const int2 InsetSize = max(ViewSize / 3, int2(160, 120));
+		const int2 Pad = int2(12, 12);
+		const int2 InsetMin = ViewSize - InsetSize - Pad;
+		const int2 InsetMax = ViewSize - Pad;
+
+		if (LocalPixel.x >= InsetMin.x && LocalPixel.y >= InsetMin.y
+			&& LocalPixel.x < InsetMax.x && LocalPixel.y < InsetMax.y)
+		{
+			// 2px cyan border so the window is obvious.
+			const bool bBorder =
+				LocalPixel.x < InsetMin.x + 2 || LocalPixel.y < InsetMin.y + 2
+				|| LocalPixel.x >= InsetMax.x - 2 || LocalPixel.y >= InsetMax.y - 2;
+			if (bBorder)
+			{
+				RWSceneColor[ScenePixel] = float4(0.1, 0.95, 0.95, Scene.a);
+				return;
+			}
+
+			const float2 DebugUv = float2(LocalPixel - InsetMin - int2(2, 2) + 0.5)
+				/ max(float2(InsetSize - int2(4, 4)), float2(1.0, 1.0));
+			float3 Factor;
+			float Coverage;
+			float3 LitRgb;
+			SampleRelight(saturate(DebugUv), Factor, Coverage, LitRgb);
+			// Full-scene lighting buffer preview (includes box shadows on proxy). Empty = magenta.
+			const float3 EmptyTint = float3(0.15, 0.02, 0.1);
+			const float3 DebugRgb = (Luma(LitRgb) > 1e-4 || Coverage > 0.01)
+				? (LitRgb * RelightBrightness * RelightExposure)
+				: EmptyTint;
+			RWSceneColor[ScenePixel] = float4(DebugRgb, Scene.a);
+			return;
+		}
+	}
+
+	if (Alpha > (1.0 / 255.0))
+	{
+		RWSceneColor[ScenePixel] = float4(OutRgb, Scene.a);
+	}
 }

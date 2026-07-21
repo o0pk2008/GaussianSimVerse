@@ -7,11 +7,17 @@
 #include "GaussianSimVerse.h"
 #include "Rendering/GaussianRenderer.h"
 #include "Rendering/GaussianProxyDofMitigation.h"
+#include "Rendering/GaussianRelighting.h"
 #include "Components/BillboardComponent.h"
 #include "Components/BoxComponent.h"
 #include "Components/SceneComponent.h"
+#include "Components/SceneCaptureComponent2D.h"
+#include "Components/SkyLightComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/TextureRenderTarget2D.h"
+#include "Engine/TextureCube.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "UObject/ConstructorHelpers.h"
 #if WITH_EDITOR
 #include "Editor/GaussianProxyMeshGenerator.h"
@@ -21,7 +27,10 @@
 
 AGaussianSceneActor::AGaussianSceneActor()
 {
-	PrimaryActorTick.bCanEverTick = false;
+	// Tick only needed when relighting is enabled (enabled in UpdateRelighting).
+	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bStartWithTickEnabled = false;
+	PrimaryActorTick.TickGroup = TG_PostUpdateWork;
 
 	SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("SceneRoot"));
 	SetRootComponent(SceneRoot);
@@ -107,6 +116,8 @@ void AGaussianSceneActor::OnConstruction(const FTransform& Transform)
 {
 	Super::OnConstruction(Transform);
 
+	// Property edits (incl. relight Blend slider) re-run construction scripts. Never tear down /
+	// re-InitGPU multi-million splat buffers here — only soft-sync transform + settings.
 	if (GaussianScene && GaussianAsset && GaussianAsset->IsValidForRendering())
 	{
 		GaussianScene->WorldTransform = GetActorTransform();
@@ -115,10 +126,16 @@ void AGaussianSceneActor::OnConstruction(const FTransform& Transform)
 
 		if (GaussianScene->IsRegisteredWithRenderer())
 		{
-			FGaussianRenderer::Get().MarkSceneDirty(GaussianScene);
+			FGaussianRenderer::Get().MarkSceneDirty(GaussianScene, /*bFlushImmediately=*/false);
+		}
+		else if (GaussianScene->Chunks.Num() > 0)
+		{
+			RefreshRenderRegistration();
 		}
 		else
 		{
+			// Scene object exists but empty (first construct) — build chunks without Unregister churn.
+			RebuildGaussianScene();
 			RefreshRenderRegistration();
 		}
 		return;
@@ -142,6 +159,8 @@ void AGaussianSceneActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		GaussianProxyDofMitigation::SetActive(false);
 		bProxyDofMitigationHeld = false;
 	}
+	bEnableRelighting = false;
+	UpdateRelighting();
 	UnregisterScene();
 	Super::EndPlay(EndPlayReason);
 }
@@ -183,6 +202,38 @@ void AGaussianSceneActor::PostEditChangeProperty(FPropertyChangedEvent& Property
 	Super::PostEditChangeProperty(PropertyChangedEvent);
 
 	const FName PropertyName = PropertyChangedEvent.GetPropertyName();
+
+	// Relight sliders: capture params only — never Rebuild/ApplyProxy/MarkSceneDirty (crash path).
+	const bool bRelightParamOnly =
+		PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, RelightBlend)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, RelightExposure)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, RelightBrightness)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, RelightBackground)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, RelightTextureScale)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, bRelightDebug)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, RelightEnvExposure)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, RelightEnvRotation);
+	if (bRelightParamOnly)
+	{
+		UpdateRelighting();
+		return;
+	}
+
+	if (PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, bEnableRelighting)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, RelightSkydome))
+	{
+		// Enable / skydome may need proxy capture + material; still no full GPU re-init.
+		if (bEnableRelighting)
+		{
+			ApplyProxyMeshSettings(); // ends with UpdateRelighting
+		}
+		else
+		{
+			UpdateRelighting();
+		}
+		return;
+	}
+
 	if (PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianSceneActor, GaussianAsset))
 	{
 		SnapActorToAssetOrigin();
@@ -372,11 +423,12 @@ void AGaussianSceneActor::ApplyProxyMeshSettings()
 	ProxyMeshComponent->SetStaticMesh(ProxyMesh);
 
 	const bool bWantsCustomDepth = bProxyWriteCustomDepth || (ProxyDofMode != EGaussianProxyDofMode::Off);
-	// Scene Depth early write: sensors only �?never for DOF beauty.
+	// Scene Depth early write: sensors only — never for DOF beauty.
 	const bool bEarlySceneDepth = bProxyWriteSceneDepth && ProxyDofMode == EGaussianProxyDofMode::Off;
 	const bool bWantsAnyDepthPass = bEarlySceneDepth || bWantsCustomDepth;
 	const bool bComponentActive = ProxyMesh != nullptr
-		&& (bShowProxyMesh || bWantsAnyDepthPass || bProxyEnableCollision || (ProxyDofMode != EGaussianProxyDofMode::Off));
+		&& (bShowProxyMesh || bWantsAnyDepthPass || bProxyEnableCollision
+			|| (ProxyDofMode != EGaussianProxyDofMode::Off) || bEnableRelighting);
 
 	ProxyMeshComponent->SetVisibility(bComponentActive);
 	ProxyMeshComponent->SetHiddenInGame(!bComponentActive);
@@ -385,8 +437,11 @@ void AGaussianSceneActor::ApplyProxyMeshSettings()
 	// Stencil 0 is reserved "no proxy"; keep [1,255] to avoid clearing exclude mask.
 	ProxyMeshComponent->SetCustomDepthStencilValue(FMath::Clamp(ProxyCustomDepthStencilValue, 1, 255));
 	// Depth-only path: no lit main pass; no early SceneDepth when Proxy DOF is on.
+	// When relighting, keep lighting channels / base pass usable for SceneCapture.
 	GaussianProxyDofMitigation::ConfigureDepthOnlyComponent(
-		ProxyMeshComponent, bShowProxyMesh, bEarlySceneDepth);
+		ProxyMeshComponent,
+		bShowProxyMesh || bEnableRelighting,
+		bEarlySceneDepth);
 
 	if (bProxyEnableCollision)
 	{
@@ -409,8 +464,8 @@ void AGaussianSceneActor::ApplyProxyMeshSettings()
 	ProxyMeshComponent->SetRelativeRotation(FRotator::ZeroRotator);
 	ProxyMeshComponent->SetRelativeScale3D(FVector::OneVector);
 
-	// Opaque material needed for depth writes. When not shown, still assign so depth passes work.
-	if (ProxyMesh && bComponentActive)
+	// Opaque material for depth / custom depth. Relighting installs its own lit MID afterward.
+	if (ProxyMesh && bComponentActive && !bEnableRelighting)
 	{
 		if (UMaterialInterface* DepthMat = LoadObject<UMaterialInterface>(
 			nullptr, TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial")))
@@ -429,6 +484,113 @@ void AGaussianSceneActor::ApplyProxyMeshSettings()
 
 	ProxyMeshComponent->MarkRenderStateDirty();
 	SyncDepthOfFieldToScene();
+	UpdateRelighting();
+}
+
+void AGaussianSceneActor::UpdateRelighting()
+{
+	const bool bWant = bEnableRelighting && ProxyMesh != nullptr && ProxyMeshComponent != nullptr;
+	PrimaryActorTick.SetTickFunctionEnable(bWant);
+
+	if (!bWant)
+	{
+		if (RelightCapture)
+		{
+			RelightCapture->bCaptureEveryFrame = false;
+			RelightCapture->TextureTarget = nullptr;
+			RelightCapture->ShowOnlyComponents.Reset();
+		}
+		if (RelightSkyLight)
+		{
+			FGaussianRelightSettings Off;
+			GaussianRelighting::ApplyEnvironment(RelightSkyLight, Off);
+		}
+		if (ProxyMeshComponent)
+		{
+			ProxyMeshComponent->SetVisibleInSceneCaptureOnly(false);
+		}
+		GaussianRelighting::ConfigureMainViewShadowCaster(RelightShadowProxy, nullptr, FVector::ZeroVector, false);
+		GaussianRelighting::RestoreHiddenShadowCasters(RelightHiddenShadowCasters);
+		FGaussianRenderer::Get().SetRelightFrameState_GameThread(FGaussianRelightFrameState{});
+		return;
+	}
+
+	USceneCaptureComponent2D* Capture = RelightCapture;
+	UTextureRenderTarget2D* RT = RelightRenderTarget;
+	USkyLightComponent* Sky = RelightSkyLight;
+	GaussianRelighting::EnsureComponents(this, Capture, RT, Sky);
+	RelightCapture = Capture;
+	RelightRenderTarget = RT;
+	RelightSkyLight = Sky;
+
+	if (!RelightShadowProxy)
+	{
+		RelightShadowProxy = NewObject<UStaticMeshComponent>(this, TEXT("RelightShadowProxy"));
+		RelightShadowProxy->SetupAttachment(GetRootComponent());
+		RelightShadowProxy->RegisterComponent();
+	}
+
+	if (!RelightProxyMaterial)
+	{
+		RelightProxyMaterial = GaussianRelighting::CreateProxyLitMID(this);
+	}
+
+	GaussianRelighting::ConfigureProxyVisibilityForRelight(
+		ProxyMeshComponent,
+		true,
+		bShowProxyMesh,
+		RelightProxyMaterial);
+
+	// Invisible mesh in the main view → sun shadows on the ground / other actors.
+	GaussianRelighting::ConfigureMainViewShadowCaster(
+		RelightShadowProxy,
+		ProxyMesh,
+		ProxyMeshLocalOffset,
+		true);
+
+	// Full-scene lighting capture: box/walls occlude light and cast onto the gray proxy.
+	GaussianRelighting::ConfigureCapture(RelightCapture, ProxyMeshComponent, RelightRenderTarget);
+	GaussianRelighting::SyncCaptureToActiveView(
+		RelightCapture,
+		GetWorld(),
+		RelightTextureScale,
+		RT,
+		this);
+	RelightRenderTarget = RT;
+	if (RelightCapture)
+	{
+		RelightCapture->TextureTarget = RelightRenderTarget;
+	}
+
+	FGaussianRelightSettings Settings;
+	Settings.bEnabled = true;
+	Settings.Blend = RelightBlend;
+	Settings.Exposure = RelightExposure;
+	Settings.Brightness = RelightBrightness;
+	Settings.Background = RelightBackground;
+	Settings.TextureScale = RelightTextureScale;
+	Settings.bDebug = bRelightDebug;
+	Settings.EnvExposure = RelightEnvExposure;
+	Settings.EnvRotationDegrees = RelightEnvRotation;
+	Settings.Skydome = RelightSkydome;
+	GaussianRelighting::ApplyEnvironment(RelightSkyLight, Settings);
+
+	FGaussianRenderer::Get().SetRelightFrameState_GameThread(
+		GaussianRelighting::MakeFrameState(Settings, RelightRenderTarget));
+}
+
+void AGaussianSceneActor::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+	if (bEnableRelighting)
+	{
+		UpdateRelighting();
+	}
+}
+
+bool AGaussianSceneActor::ShouldTickIfViewportsOnly() const
+{
+	return bEnableRelighting;
 }
 
 #if WITH_EDITOR
@@ -566,7 +728,13 @@ void AGaussianSceneActor::GenerateProxyMeshFromAsset()
 
 void AGaussianSceneActor::RebuildGaussianScene()
 {
-	UnregisterScene();
+	// Only unregister when tearing down rendering for a real asset/content change.
+	// Avoid Unregister+Register+InitGPU on every construction-script pass (relight UI).
+	const bool bWasRegistered = GaussianScene && GaussianScene->IsRegisteredWithRenderer();
+	if (bWasRegistered)
+	{
+		UnregisterScene();
+	}
 
 	if (!GaussianScene)
 	{

@@ -200,12 +200,43 @@ void UGaussianAsset::InitGPUResources()
 		return;
 	}
 
+	// Streamed GPU-only assets already have a committed buffer; never re-stage from empty bulk.
+	if (BulkSplatData.Num() <= 0
+		&& GPUBuffer.IsValid()
+		&& GPUBuffer->HasValidData())
+	{
+		return;
+	}
+
 	EnsureStagingLoaded();
 	EnsureShCoefficientsLoaded();
+
+	if (StagingCache.Num() <= 0)
+	{
+		return;
+	}
 
 	if (!GPUBuffer.IsValid())
 	{
 		GPUBuffer = MakeShared<FGaussianGPUBuffer, ESPMode::ThreadSafe>();
+	}
+
+	// Skip full re-convert/upload when data is already resident (e.g. PostEdit slider spam).
+	// Re-staging multi-million splats while the RT is sampling the buffer caused AVs.
+	if (GPUBuffer->HasValidData()
+		&& GPUBuffer->GetNumGaussians() == static_cast<uint32>(StagingCache.Num())
+		&& !GPUBuffer->IsDirty())
+	{
+		GaussianCount = StagingCache.Num();
+		return;
+	}
+
+	// If still dirty (not yet uploaded) but count matches, leave staging alone — upload will run.
+	if (GPUBuffer->HasValidData()
+		&& GPUBuffer->GetNumGaussians() == static_cast<uint32>(StagingCache.Num()))
+	{
+		GaussianCount = StagingCache.Num();
+		return;
 	}
 
 	GPUBuffer->SetCPUDataFromStaging(StagingCache, ShCoefficientCache, ImportedShDegree);

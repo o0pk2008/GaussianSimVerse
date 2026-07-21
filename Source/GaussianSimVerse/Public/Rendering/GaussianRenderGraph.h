@@ -72,6 +72,15 @@ public:
 		bool bExportSoftDepthForDof = false;
 		/** Optional out: R32_FLOAT DeviceZ, 0 = no gaussian. */
 		FRDGTextureRef* OutSoftDepthDeviceZ = nullptr;
+
+		/** PlayCanvas-style relight: screen-aligned lit proxy map (may be system black dummy). */
+		FRDGTextureRef RelightTexture = nullptr;
+		bool bRelightEnabled = false;
+		bool bRelightDebug = false;
+		float RelightBlend = 1.0f;
+		float RelightExposure = 1.0f;
+		float RelightBrightness = 2.0f;
+		float RelightBackground = 1.0f;
 	};
 
 	static FGaussianRDGTransientResources AllocateTransientResources(FRDGBuilder& GraphBuilder);

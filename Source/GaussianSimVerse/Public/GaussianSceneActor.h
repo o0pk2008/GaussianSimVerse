@@ -208,6 +208,55 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Gaussian|Proxy|Depth Of Field")
 	void SyncDepthOfFieldToScene();
 
+	// --- Relighting (PlayCanvas-style proxy lighting → splat modulate) ---
+
+	/**
+	 * Enable runtime relighting: lit proxy mesh is captured each frame and multiplies splat colors.
+	 * Requires a Proxy Mesh. Uses UE Directional / Point / Spot lights + shadows in the capture.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Relighting|Global", meta = (DisplayName = "Enable Relighting", DisplayPriority = 30))
+	bool bEnableRelighting = false;
+
+	/** 0 = original baked gaussians, 1 = fully modulated by lit proxy (PlayCanvas blend). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Relighting|Global", meta = (ClampMin = "0.0", ClampMax = "1.0", UIMin = "0.0", UIMax = "1.0", DisplayName = "Blend", EditCondition = "bEnableRelighting", DisplayPriority = 31))
+	float RelightBlend = 1.0f;
+
+	/** Extra exposure on the lighting factor (after Brightness). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Relighting|Global", meta = (ClampMin = "0.0", ClampMax = "8.0", UIMin = "0.0", UIMax = "8.0", DisplayName = "Exposure", EditCondition = "bEnableRelighting", DisplayPriority = 32))
+	float RelightExposure = 1.0f;
+
+	/** Compensates proxy gray albedo (PlayCanvas default 2 for ~0.5 albedo). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Relighting|Global", meta = (ClampMin = "0.0", ClampMax = "8.0", UIMin = "0.0", UIMax = "8.0", DisplayName = "Brightness", EditCondition = "bEnableRelighting", DisplayPriority = 33))
+	float RelightBrightness = 2.0f;
+
+	/** Multiplier for splat pixels not covered by the proxy mesh. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Relighting|Global", meta = (ClampMin = "0.0", ClampMax = "8.0", UIMin = "0.0", UIMax = "8.0", DisplayName = "Background", EditCondition = "bEnableRelighting", DisplayPriority = 34))
+	float RelightBackground = 1.0f;
+
+	/** Capture resolution vs view size (0.25–1). Lower = cheaper. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Relighting|Global", meta = (ClampMin = "0.25", ClampMax = "1.0", UIMin = "0.25", UIMax = "1.0", DisplayName = "Texture Scale", EditCondition = "bEnableRelighting", DisplayPriority = 35))
+	float RelightTextureScale = 0.5f;
+
+	/** Bottom-right window: lit proxy mesh only (cyan border). Main view stays gaussians. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Relighting|Global", meta = (DisplayName = "Debug", EditCondition = "bEnableRelighting", DisplayPriority = 36))
+	bool bRelightDebug = false;
+
+	/** HDR cubemap for ambient / image-based fill via a movable SkyLight (affects capture + scene ambient). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Relighting|Environment", meta = (DisplayName = "Skydome", EditCondition = "bEnableRelighting", DisplayPriority = 40))
+	TObjectPtr<class UTextureCube> RelightSkydome;
+
+	/** SkyLight intensity (environment exposure). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Relighting|Environment", meta = (ClampMin = "0.0", ClampMax = "16.0", UIMin = "0.0", UIMax = "16.0", DisplayName = "Exposure", EditCondition = "bEnableRelighting", DisplayPriority = 41))
+	float RelightEnvExposure = 1.0f;
+
+	/** Cubemap yaw in degrees (SkyLight SourceCubemapAngle). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Relighting|Environment", meta = (ClampMin = "0.0", ClampMax = "360.0", UIMin = "0.0", UIMax = "360.0", DisplayName = "Rotation", EditCondition = "bEnableRelighting", DisplayPriority = 42))
+	float RelightEnvRotation = 0.0f;
+
+	/** Refresh capture camera, RT, environment, and push state to the renderer. */
+	UFUNCTION(BlueprintCallable, Category = "Gaussian|Relighting")
+	void UpdateRelighting();
+
 protected:
 	/** Whether this actor currently holds a Proxy-DOF AO-suppress refcount. */
 	bool bProxyDofMitigationHeld = false;
@@ -235,12 +284,34 @@ public:
 	UPROPERTY()
 	TObjectPtr<class UStaticMeshComponent> ProxyMeshComponent;
 
+	UPROPERTY(Transient)
+	TObjectPtr<class USceneCaptureComponent2D> RelightCapture;
+
+	UPROPERTY(Transient)
+	TObjectPtr<class UTextureRenderTarget2D> RelightRenderTarget;
+
+	UPROPERTY(Transient)
+	TObjectPtr<class USkyLightComponent> RelightSkyLight;
+
+	UPROPERTY(Transient)
+	TObjectPtr<class UMaterialInstanceDynamic> RelightProxyMaterial;
+
+	/** Invisible main-view mesh: casts sun shadows onto ground / other actors. */
+	UPROPERTY(Transient)
+	TObjectPtr<class UStaticMeshComponent> RelightShadowProxy;
+
+	/** Primitives we flipped to CastHiddenShadow while relighting (restored on disable). */
+	TArray<TWeakObjectPtr<UPrimitiveComponent>> RelightHiddenShadowCasters;
+
 protected:
 	virtual void PostRegisterAllComponents() override;
 	virtual void PostUnregisterAllComponents() override;
 	virtual void OnConstruction(const FTransform& Transform) override;
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	virtual void Tick(float DeltaSeconds) override;
+	/** Keep SceneCapture camera in sync while editing (no PIE). */
+	virtual bool ShouldTickIfViewportsOnly() const override;
 	virtual void BeginDestroy() override;
 	virtual void SetActorHiddenInGame(bool bNewHidden) override;
 #if WITH_EDITOR

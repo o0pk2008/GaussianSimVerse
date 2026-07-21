@@ -2056,8 +2056,18 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 			FGaussianCompositeCS::FParameters* CompositeParams = GraphBuilder.AllocParameters<FGaussianCompositeCS::FParameters>();
 			CompositeParams->ViewRect = ViewRect;
 			CompositeParams->SceneColorOffset = SceneColorOffset;
+			CompositeParams->bRelightEnabled = Inputs.bRelightEnabled ? 1u : 0u;
+			CompositeParams->bRelightDebug = (Inputs.bRelightEnabled && Inputs.bRelightDebug) ? 1u : 0u;
+			CompositeParams->RelightBlend = Inputs.RelightBlend;
+			CompositeParams->RelightExposure = Inputs.RelightExposure;
+			CompositeParams->RelightBrightness = Inputs.RelightBrightness;
+			CompositeParams->RelightBackground = Inputs.RelightBackground;
 			CompositeParams->SceneColorTexture = SceneColorTexture;
 			CompositeParams->OverlayTexture = OverlayTexture;
+			CompositeParams->RelightTexture = Inputs.RelightTexture
+				? Inputs.RelightTexture
+				: GSystemTextures.GetBlackDummy(GraphBuilder);
+			CompositeParams->RelightSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 			CompositeParams->RWSceneColor = MergedUAV;
 
 			const uint32 GroupsX = FMath::DivideAndRoundUp(ViewWidth, 8u);

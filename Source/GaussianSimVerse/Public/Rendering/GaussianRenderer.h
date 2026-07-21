@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Rendering/GaussianRenderResources.h"
+#include "Rendering/GaussianRelighting.h"
 #include "RendererInterface.h"
 
 class UGaussianScene;
@@ -86,6 +87,15 @@ public:
 		float& OutMaxBlurRadiusPx,
 		uint32& OutProxyStencil) const;
 
+	/**
+	 * Game-thread: push PlayCanvas-style relight RT + params for the next composite.
+	 * Call each tick from the actor that owns the SceneCapture (last writer wins).
+	 */
+	void SetRelightFrameState_GameThread(const FGaussianRelightFrameState& State);
+
+	/** Copy of last game-thread relight state (render thread reads under SceneLock). */
+	FGaussianRelightFrameState GetRelightFrameState() const;
+
 	bool IsInitialized() const { return bInitialized; }
 
 private:
@@ -129,4 +139,6 @@ private:
 	mutable TArray<FGaussianCachedViewState> CachedViewsThisFrame;
 	mutable uint32 CachedViewsFrameNumber = 0;
 	TSharedPtr<FGaussianViewExtension, ESPMode::ThreadSafe> ViewExtension;
+
+	FGaussianRelightFrameState RelightFrameState;
 };
