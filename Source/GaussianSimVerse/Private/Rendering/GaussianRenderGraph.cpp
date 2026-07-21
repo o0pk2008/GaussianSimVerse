@@ -13,6 +13,7 @@
 #include "PipelineStateCache.h"
 #include "RHIStaticStates.h"
 #include "CommonRenderResources.h"
+#include "SystemTextures.h"
 
 namespace GaussianRenderGraphPrivate
 {
@@ -1170,7 +1171,10 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 	const TShaderMapRef<FGaussianBinSplatsFillCS> BinFillShader(GlobalShaderMap);
 	const TShaderMapRef<FGaussianTileSortCS> TileSortShader(GlobalShaderMap);
 	const TShaderMapRef<FGaussianTileBlendCS> TileBlendShader(GlobalShaderMap);
-	const bool bDrawShadersValid = SplatDrawVertexShader.IsValid() && SplatDrawPixelShader.IsValid();
+	// Soft-depth for CineCamera DOF is written only on compute paths (Tile/RasterCS).
+	const bool bPreferComputeRasterForSoftDepth = Inputs.bExportSoftDepthForDof;
+	const bool bDrawShadersValid = !bPreferComputeRasterForSoftDepth
+		&& SplatDrawVertexShader.IsValid() && SplatDrawPixelShader.IsValid();
 	const bool bTileShadersValid = BinFillShader.IsValid() && TileSortShader.IsValid() && TileBlendShader.IsValid();
 	if (!bTileShadersValid && !bDrawShadersValid && !RasterShader.IsValid())
 	{
@@ -1189,6 +1193,18 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 	FRDGTextureRef OverlayTexture = GraphBuilder.CreateTexture(OverlayDesc, TEXT("Gaussian.SplatOverlay"));
 	FRDGTextureUAVRef OverlayUAV = GraphBuilder.CreateUAV(OverlayTexture);
 	AddClearUAVPass(GraphBuilder, OverlayUAV, FVector4f(0.0f, 0.0f, 0.0f, 0.0f));
+
+	// Soft depth: R32_UINT DeviceZ bits (0 = empty). Reverse-Z nearer = larger �� InterlockedMax in shaders.
+	const bool bExportSoftDepth = Inputs.bExportSoftDepthForDof;
+	FRDGTextureDesc SoftDepthDesc = FRDGTextureDesc::Create2D(
+		OverlayExtent,
+		PF_R32_UINT,
+		FClearValueBinding::Black,
+		TexCreate_ShaderResource | TexCreate_UAV);
+	FRDGTextureRef SoftDepthTexture = GraphBuilder.CreateTexture(SoftDepthDesc, TEXT("Gaussian.SoftDepthBits"));
+	FRDGTextureUAVRef SoftDepthUAV = GraphBuilder.CreateUAV(SoftDepthTexture);
+	AddClearUAVPass(GraphBuilder, SoftDepthUAV, 0u);
+	const uint32 WriteSoftDepthFlag = bExportSoftDepth ? 1u : 0u;
 
 	const TArray<float> DummyShCoefficientsCPU = { 0.0f };
 	FRDGBufferRef DummyShCoefficientsBuffer = CreateStructuredUploadBuffer(
@@ -1233,7 +1249,7 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 	const FVector3f CameraWorldPosition(Inputs.ViewData.ViewOrigin);
 	const FVector3f CameraViewDirection(Inputs.ViewData.ViewDirection.GetSafeNormal());
 
-	// Local 0-based rect for projection and raster — matches SceneColor slice / base-pass render resolution.
+	// Local 0-based rect for projection and raster �?matches SceneColor slice / base-pass render resolution.
 	const FVector4f ViewRect(
 		0.0f,
 		0.0f,
@@ -1243,7 +1259,41 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 	// ViewportRect == ViewRect here: clip-to-screen stays in overlay space; composite adds SceneColorOffset.
 	const FVector4f ViewportRect = ViewRect;
 
+	// Overlay/composite: origin of the PP SceneColor slice (may be 0,0 after late resolves).
 	const FIntPoint SceneColorOffset = Inputs.SceneColorViewRect.Min;
+	// SceneDepth / CustomStencil: SceneTextures absolute pixels (ViewRect.Min). Critical for
+	// depth occlusion of regular actors when inject is AfterDOF/MB (DOF Mode Off).
+	const FIntPoint SceneDepthOffset = Inputs.SceneDepthPixelOffset;
+	const bool bDepthOcclusion = Inputs.bDepthOcclusion && Inputs.SceneDepthTexture != nullptr;
+	const uint32 DepthOcclusionFlag = bDepthOcclusion ? 1u : 0u;
+	const float DepthOcclusionBias = Inputs.DepthOcclusionBiasCm;
+	const FVector4f InvDeviceZToWorldZTransform = Inputs.InvDeviceZToWorldZTransform;
+	FRDGTextureRef SceneDepthTexture = Inputs.SceneDepthTexture;
+	const uint32 ProxyStencilExclude = Inputs.ProxyStencilExclude;
+	// PF_X24_G8 is only valid on PF_DepthStencil textures (RHI asserts otherwise).
+	// Never CreateWithPixelFormat(..., PF_X24_G8) on color/depth-dummy resources.
+	FRDGTextureSRVRef CustomStencilSRV = Inputs.CustomStencilSRV;
+	if (!CustomStencilSRV && SceneDepthTexture && SceneDepthTexture->Desc.Format == PF_DepthStencil)
+	{
+		// Bindable fallback only (main-depth stencil �?proxy custom stencil).
+		CustomStencilSRV = GraphBuilder.CreateSRV(
+			FRDGTextureSRVDesc::CreateWithPixelFormat(SceneDepthTexture, PF_X24_G8));
+	}
+	if (!CustomStencilSRV)
+	{
+		// 1x1 DepthStencil so the shader can always bind a legal stencil view.
+		const FRDGTextureDesc DummyDesc = FRDGTextureDesc::Create2D(
+			FIntPoint(1, 1),
+			PF_DepthStencil,
+			FClearValueBinding::DepthFar,
+			TexCreate_ShaderResource | TexCreate_DepthStencilTargetable | TexCreate_InputAttachmentRead);
+		FRDGTextureRef DummyDepthStencil = GraphBuilder.CreateTexture(DummyDesc, TEXT("Gaussian.DummyDepthStencil"));
+		AddClearDepthStencilPass(GraphBuilder, DummyDepthStencil, true, 0.0f, true, 0);
+		CustomStencilSRV = GraphBuilder.CreateSRV(
+			FRDGTextureSRVDesc::CreateWithPixelFormat(DummyDepthStencil, PF_X24_G8));
+	}
+	const uint32 bUseProxyStencilExclude =
+		(Inputs.bExcludeProxyStencilFromOcclusion && Inputs.CustomStencilSRV != nullptr) ? 1u : 0u;
 
 	if (Inputs.View != nullptr && GaussianSimVerse::RenderSettings::IsRenderDebugEnabled())
 	{
@@ -1479,6 +1529,17 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 			BlendParameters->ChunkBindingParams = TransientResources.GlobalChunkBindingParamsSRV;
 			BlendParameters->GaussianSplatsVec4 = TransientResources.GlobalUnifiedSplatsSRV;
 			BlendParameters->GaussianShCoeffs = GlobalShSRV;
+			BlendParameters->bDepthOcclusion = DepthOcclusionFlag;
+			BlendParameters->DepthOcclusionBias = DepthOcclusionBias;
+			BlendParameters->InvDeviceZToWorldZTransform = InvDeviceZToWorldZTransform;
+			BlendParameters->SceneColorOffset = SceneColorOffset;
+			BlendParameters->SceneDepthOffset = SceneDepthOffset;
+			BlendParameters->bUseProxyStencilExclude = bUseProxyStencilExclude;
+			BlendParameters->ProxyStencilExclude = ProxyStencilExclude;
+			BlendParameters->SceneDepthTexture = SceneDepthTexture;
+			BlendParameters->CustomStencilTexture = CustomStencilSRV;
+			BlendParameters->bWriteSoftDepth = WriteSoftDepthFlag;
+			BlendParameters->RWSoftDepthBits = SoftDepthUAV;
 			BlendParameters->RWOverlay = OverlayUAV;
 
 			FComputeShaderUtils::AddPass(
@@ -1532,6 +1593,15 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 					TransientResources.GlobalChunkMatrixRowsSRV,
 					TransientResources.GlobalChunkBindingParamsSRV,
 					1u);
+				DrawParameters->Shared.bDepthOcclusion = DepthOcclusionFlag;
+				DrawParameters->Shared.DepthOcclusionBias = DepthOcclusionBias;
+				DrawParameters->Shared.InvDeviceZToWorldZTransform = InvDeviceZToWorldZTransform;
+				DrawParameters->Shared.SceneColorOffset = SceneColorOffset;
+				DrawParameters->Shared.SceneDepthOffset = SceneDepthOffset;
+				DrawParameters->Shared.bUseProxyStencilExclude = bUseProxyStencilExclude;
+				DrawParameters->Shared.ProxyStencilExclude = ProxyStencilExclude;
+				DrawParameters->Shared.SceneDepthTexture = SceneDepthTexture;
+				DrawParameters->Shared.CustomStencilTexture = CustomStencilSRV;
 				DrawParameters->RenderTargets[0] = FRenderTargetBinding(OverlayTexture, ERenderTargetLoadAction::ELoad);
 
 				GaussianRenderGraphPrivate::AddGaussianSplatDrawPass(
@@ -1663,7 +1733,7 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 				bDrawShadersValid);
 		}
 
-		// Legacy compute global raster TDRs on huge clouds — only force tile when draw shaders are unavailable.
+		// Legacy compute global raster TDRs on huge clouds �?only force tile when draw shaders are unavailable.
 		const uint32 MaxSafeGlobal = GaussianSimVerse::RenderSettings::GetMaxSafeGlobalRasterSplats();
 		if (!bUseTilePath && !bDrawShadersValid && SortedCount > MaxSafeGlobal && bTileShadersValid)
 		{
@@ -1817,6 +1887,17 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 			BlendParameters->ChunkBindingParams = DummyChunkBindingParamsSRV;
 			BlendParameters->GaussianSplatsVec4 = Binding.SplatSRV;
 			BlendParameters->GaussianShCoeffs = Binding.ShCoefficientsSRV ? Binding.ShCoefficientsSRV : DummyShCoefficientsSRV;
+			BlendParameters->bDepthOcclusion = DepthOcclusionFlag;
+			BlendParameters->DepthOcclusionBias = DepthOcclusionBias;
+			BlendParameters->InvDeviceZToWorldZTransform = InvDeviceZToWorldZTransform;
+			BlendParameters->SceneColorOffset = SceneColorOffset;
+			BlendParameters->SceneDepthOffset = SceneDepthOffset;
+			BlendParameters->bUseProxyStencilExclude = bUseProxyStencilExclude;
+			BlendParameters->ProxyStencilExclude = ProxyStencilExclude;
+			BlendParameters->SceneDepthTexture = SceneDepthTexture;
+			BlendParameters->CustomStencilTexture = CustomStencilSRV;
+			BlendParameters->bWriteSoftDepth = WriteSoftDepthFlag;
+			BlendParameters->RWSoftDepthBits = SoftDepthUAV;
 			BlendParameters->RWOverlay = OverlayUAV;
 
 			FComputeShaderUtils::AddPass(
@@ -1870,6 +1951,15 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 					DummyChunkMatrixRowsSRV,
 					DummyChunkBindingParamsSRV);
 
+				DrawParameters->Shared.bDepthOcclusion = DepthOcclusionFlag;
+				DrawParameters->Shared.DepthOcclusionBias = DepthOcclusionBias;
+				DrawParameters->Shared.InvDeviceZToWorldZTransform = InvDeviceZToWorldZTransform;
+				DrawParameters->Shared.SceneColorOffset = SceneColorOffset;
+				DrawParameters->Shared.SceneDepthOffset = SceneDepthOffset;
+				DrawParameters->Shared.bUseProxyStencilExclude = bUseProxyStencilExclude;
+				DrawParameters->Shared.ProxyStencilExclude = ProxyStencilExclude;
+				DrawParameters->Shared.SceneDepthTexture = SceneDepthTexture;
+				DrawParameters->Shared.CustomStencilTexture = CustomStencilSRV;
 				DrawParameters->RenderTargets[0] = FRenderTargetBinding(OverlayTexture, ERenderTargetLoadAction::ELoad);
 
 				GaussianRenderGraphPrivate::AddGaussianSplatDrawPass(
@@ -1923,6 +2013,17 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 				PassParameters->VisibleCountBuffer = CullResult.VisibleCountSRV;
 				PassParameters->GaussianSplatsVec4 = Binding.SplatSRV;
 				PassParameters->GaussianShCoeffs = Binding.ShCoefficientsSRV ? Binding.ShCoefficientsSRV : DummyShCoefficientsSRV;
+				PassParameters->bDepthOcclusion = DepthOcclusionFlag;
+				PassParameters->DepthOcclusionBias = DepthOcclusionBias;
+				PassParameters->InvDeviceZToWorldZTransform = InvDeviceZToWorldZTransform;
+				PassParameters->SceneColorOffset = SceneColorOffset;
+				PassParameters->SceneDepthOffset = SceneDepthOffset;
+				PassParameters->bUseProxyStencilExclude = bUseProxyStencilExclude;
+				PassParameters->ProxyStencilExclude = ProxyStencilExclude;
+				PassParameters->SceneDepthTexture = SceneDepthTexture;
+				PassParameters->CustomStencilTexture = CustomStencilSRV;
+				PassParameters->bWriteSoftDepth = WriteSoftDepthFlag;
+				PassParameters->RWSoftDepthBits = SoftDepthUAV;
 				PassParameters->RWOverlay = OverlayUAV;
 
 				const uint32 NumGroups = FMath::DivideAndRoundUp(BatchCount, GaussianThreadGroupSize);
@@ -1974,6 +2075,12 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 		else
 		{
 			UE_LOG(LogGaussianSimVerse, Warning, TEXT("GaussianSimVerse composite shader is not compiled; splats were rasterized but not blended."));
+		}
+
+		// Soft depth is written during compute raster (Tile/RasterCS), independent of composite success.
+		if (bExportSoftDepth && Inputs.OutSoftDepthDeviceZ)
+		{
+			*Inputs.OutSoftDepthDeviceZ = SoftDepthTexture;
 		}
 	}
 

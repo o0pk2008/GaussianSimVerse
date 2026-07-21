@@ -1,0 +1,117 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+// Separable CoC blur for GaussianSimVerse proxy DOF (CustomDepth-based).
+
+#include "/Engine/Public/Platform.ush"
+
+float4 ViewRect;
+int2 TextureSize;
+float2 BlurDirection;
+float FocalDistanceCm;
+float CocScale;
+float MaxBlurRadiusPx;
+float4 InvDeviceZToWorldZTransform;
+uint ProxyStencil;
+uint bHasCustomStencil;
+uint bHasCustomDepth;
+uint bHasSceneDepth;
+
+Texture2D SceneColorTexture;
+Texture2D SceneDepthTexture;
+Texture2D CustomDepthTexture;
+// Bound as stencil plane SRV (PF_X24_G8). Load .g for stencil value when available.
+Texture2D CustomStencilTexture;
+RWTexture2D<float4> RWOutput;
+
+float ConvertDeviceZ(float DeviceZ)
+{
+	// Guard divide-by-zero from bad InvDeviceZ transform / cleared depth.
+	const float Denom = DeviceZ * InvDeviceZToWorldZTransform.z - InvDeviceZToWorldZTransform.w;
+	const float Linear = DeviceZ * InvDeviceZToWorldZTransform.x
+		+ InvDeviceZToWorldZTransform.y
+		+ 1.0 / max(abs(Denom), 1e-6) * sign(Denom == 0.0 ? 1.0 : Denom);
+	return Linear;
+}
+
+float SampleLinearDepth(int2 Pixel)
+{
+	bool bUseCustom = false;
+	if (bHasCustomDepth != 0u)
+	{
+		if (bHasCustomStencil != 0u)
+		{
+			// Stencil plane is often uint in .g; Load as float4 and cast.
+			const float4 St = CustomStencilTexture.Load(int3(Pixel, 0));
+			const uint Stencil = (uint)St.g;
+			bUseCustom = (Stencil == ProxyStencil);
+		}
+		else
+		{
+			const float Cd = CustomDepthTexture.Load(int3(Pixel, 0)).r;
+			bUseCustom = (Cd > 1e-8);
+		}
+	}
+
+	float DeviceZ = 0.0;
+	if (bUseCustom)
+	{
+		DeviceZ = CustomDepthTexture.Load(int3(Pixel, 0)).r;
+	}
+	else if (bHasSceneDepth != 0u)
+	{
+		DeviceZ = SceneDepthTexture.Load(int3(Pixel, 0)).r;
+	}
+	else
+	{
+		return FocalDistanceCm;
+	}
+	return max(ConvertDeviceZ(DeviceZ), 1e-2);
+}
+
+[numthreads(8, 8, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	const int2 Local = int2(DispatchThreadId.xy);
+	const int2 Size = int2(ViewRect.zw);
+	if (Local.x >= Size.x || Local.y >= Size.y)
+	{
+		return;
+	}
+
+	const int2 Pixel = Local + int2(ViewRect.xy);
+	const int2 MaxPix = max(TextureSize - int2(1, 1), int2(0, 0));
+
+	const float CenterDepth = SampleLinearDepth(Pixel);
+	const float Coc = saturate(abs(CenterDepth - FocalDistanceCm) * CocScale);
+	const float Radius = Coc * MaxBlurRadiusPx;
+
+	const float4 CenterColor = SceneColorTexture.Load(int3(Pixel, 0));
+	if (Radius < 0.5)
+	{
+		RWOutput[Pixel] = CenterColor;
+		return;
+	}
+
+	const float W0 = 0.227027;
+	const float W1 = 0.1945946;
+	const float W2 = 0.1216216;
+	const float W3 = 0.054054;
+	const float W4 = 0.016216;
+
+	float4 Acc = CenterColor * W0;
+	float WSum = W0;
+
+	[unroll]
+	for (int i = 1; i <= 4; ++i)
+	{
+		const float Offset = (Radius * (float)i) / 3.0;
+		const float2 Delta = BlurDirection * Offset;
+		const int2 P0 = clamp(Pixel + int2(Delta + 0.5), int2(0, 0), MaxPix);
+		const int2 P1 = clamp(Pixel - int2(Delta + 0.5), int2(0, 0), MaxPix);
+		const float Wi = (i == 1) ? W1 : ((i == 2) ? W2 : ((i == 3) ? W3 : W4));
+		Acc += SceneColorTexture.Load(int3(P0, 0)) * Wi;
+		Acc += SceneColorTexture.Load(int3(P1, 0)) * Wi;
+		WSum += Wi * 2.0;
+	}
+
+	RWOutput[Pixel] = Acc / max(WSum, 1e-4);
+}

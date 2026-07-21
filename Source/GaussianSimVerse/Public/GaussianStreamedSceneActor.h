@@ -151,11 +151,53 @@ public:
 	bool bProxyWriteCustomDepth = true;
 
 	/**
-	 * Write Scene Depth even when Show is off.
-	 * Can look like a black mesh (SSAO/occlusion) over Gaussians — use for sensors / hard depth.
+	 * Write Scene Depth early in the base pass (sensors / hard occlusion).
+	 * WARNING: early SceneDepth blocks the skydome → black voxels + engine sky warning.
+	 * For Cinematic DOF use "Enable Proxy Depth Of Field" instead (late depth merge).
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Proxy", meta = (DisplayName = "Write Scene Depth", DisplayPriority = 12))
 	bool bProxyWriteSceneDepth = false;
+
+	/**
+	 * How gaussians get DOF:
+	 * - CineCamera: inject BeforeDOF + late CustomDepth→SceneDepth; adjust focus on CineCamera.
+	 * - Plugin: custom blur after inject (not controlled by CineCamera).
+	 * Always keep Write Scene Depth OFF for beauty (blocks sky → black grid).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Proxy|Depth Of Field", meta = (DisplayName = "DOF Mode", DisplayPriority = 12))
+	EGaussianProxyDofMode ProxyDofMode = EGaussianProxyDofMode::Off;
+
+	/** Plugin mode only: focus distance (cm). Ignored for CineCamera mode. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Proxy|Depth Of Field", meta = (ClampMin = "1.0", UIMin = "1.0", DisplayName = "Plugin Focal Distance (cm)", EditCondition = "ProxyDofMode == EGaussianProxyDofMode::Plugin", EditConditionHides, DisplayPriority = 12))
+	float ProxyDofFocalDistanceCm = 500.0f;
+
+	/** Plugin mode only: blur strength. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Proxy|Depth Of Field", meta = (ClampMin = "0.0001", UIMin = "0.0001", DisplayName = "Plugin CoC Scale", EditCondition = "ProxyDofMode == EGaussianProxyDofMode::Plugin", EditConditionHides, DisplayPriority = 12))
+	float ProxyDofCocScale = 0.004f;
+
+	/** Plugin mode only: max blur radius in pixels. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Proxy|Depth Of Field", meta = (ClampMin = "0.0", ClampMax = "64.0", DisplayName = "Plugin Max Blur Radius (px)", EditCondition = "ProxyDofMode == EGaussianProxyDofMode::Plugin", EditConditionHides, DisplayPriority = 12))
+	float ProxyDofMaxBlurRadiusPx = 16.0f;
+
+	/** Optional AO suppress (usually unnecessary if Write Scene Depth is off). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Proxy|Depth Of Field", meta = (DisplayName = "Suppress SSAO", EditCondition = "ProxyDofMode != EGaussianProxyDofMode::Off", EditConditionHides, DisplayPriority = 12))
+	bool bProxyDofSuppressScreenSpaceAO = false;
+
+	/**
+	 * Custom Depth stencil for proxy CoC (keep default 1 unless you need multi-mask).
+	 * Prefer not changing every frame. Requires r.CustomDepth 3.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Proxy|Depth Of Field", meta = (ClampMin = "1", ClampMax = "255", UIMin = "1", UIMax = "255", DisplayName = "Custom Depth Stencil", DisplayPriority = 12))
+	int32 ProxyCustomDepthStencilValue = 1;
+
+#if WITH_EDITOR
+	/**
+	 * One-shot: require Proxy Mesh, turn on Proxy DOF, write Scene+Custom Depth, hide color mesh.
+	 * Then enable Cinematic DOF on your camera (Focal Distance / Aperture).
+	 */
+	UFUNCTION(CallInEditor, Category = "Gaussian|Proxy|Depth Of Field", meta = (DisplayName = "Setup Depth Of Field", DisplayPriority = 12))
+	void SetupDepthOfField();
+#endif
 
 	/** Runtime collision on the proxy. Independent of Show Proxy Mesh. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Proxy", meta = (DisplayName = "Enable Collision", DisplayPriority = 13))
@@ -167,6 +209,15 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Gaussian|Proxy")
 	void ApplyProxyMeshSettings();
 
+	/** Push DOF/proxy flags into GaussianScene for BeforeDOF inject. */
+	UFUNCTION(BlueprintCallable, Category = "Gaussian|Proxy|Depth Of Field")
+	void SyncDepthOfFieldToScene();
+
+protected:
+	/** Whether this actor currently holds a Proxy-DOF AO-suppress refcount. */
+	bool bProxyDofMitigationHeld = false;
+
+public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Gaussian|Rendering", meta = (DisplayName = "SH Band", DisplayPriority = 20))
 	EGaussianSHBand ShBandOverride = EGaussianSHBand::SH3;
 

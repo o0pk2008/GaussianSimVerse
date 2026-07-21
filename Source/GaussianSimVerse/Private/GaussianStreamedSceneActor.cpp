@@ -6,6 +6,7 @@
 #include "GaussianSimVerse.h"
 #include "Rendering/GaussianRenderer.h"
 #include "Rendering/GaussianRenderSettings.h"
+#include "Rendering/GaussianProxyDofMitigation.h"
 #include "Components/BillboardComponent.h"
 #include "Components/BoxComponent.h"
 #include "Components/SceneComponent.h"
@@ -73,7 +74,7 @@ AGaussianStreamedSceneActor::AGaussianStreamedSceneActor()
 void AGaussianStreamedSceneActor::PostRegisterAllComponents()
 {
 	Super::PostRegisterAllComponents();
-	// Property edits can remount components — do not force a full stream restart.
+	// Property edits can remount components �?do not force a full stream restart.
 	InitializeStreaming(false);
 	RefreshRenderRegistration();
 	ApplyStreamingCVarOverrides();
@@ -164,6 +165,12 @@ void AGaussianStreamedSceneActor::SyncSceneSettings()
 
 	GaussianScene->ShBand = ShBandOverride;
 	GaussianScene->Colors = Colors;
+	GaussianScene->DofMode = ProxyMesh ? ProxyDofMode : EGaussianProxyDofMode::Off;
+	GaussianScene->bUseProxyDepthOfField = (GaussianScene->DofMode != EGaussianProxyDofMode::Off);
+	GaussianScene->DofFocalDistanceCm = ProxyDofFocalDistanceCm;
+	GaussianScene->DofCocScale = ProxyDofCocScale;
+	GaussianScene->DofMaxBlurRadiusPx = ProxyDofMaxBlurRadiusPx;
+	GaussianScene->DofProxyStencil = static_cast<uint32>(FMath::Clamp(ProxyCustomDepthStencilValue, 0, 255));
 }
 
 void AGaussianStreamedSceneActor::ApplyStreamingCVarOverrides() const
@@ -213,7 +220,7 @@ void AGaussianStreamedSceneActor::OnConstruction(const FTransform& Transform)
 	ApplyStreamingCVarOverrides();
 	UpdateBoundsVisual();
 	ApplyProxyMeshSettings();
-	// Property edits rerun construction scripts — never wipe resident streaming here.
+	// Property edits rerun construction scripts �?never wipe resident streaming here.
 	InitializeStreaming(false);
 	RefreshRenderRegistration();
 }
@@ -228,6 +235,11 @@ void AGaussianStreamedSceneActor::BeginPlay()
 
 void AGaussianStreamedSceneActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	if (bProxyDofMitigationHeld)
+	{
+		GaussianProxyDofMitigation::SetActive(false);
+		bProxyDofMitigationHeld = false;
+	}
 	ShutdownStreaming();
 	UnregisterScene();
 	Super::EndPlay(EndPlayReason);
@@ -241,6 +253,11 @@ void AGaussianStreamedSceneActor::Tick(float DeltaSeconds)
 
 void AGaussianStreamedSceneActor::BeginDestroy()
 {
+	if (bProxyDofMitigationHeld)
+	{
+		GaussianProxyDofMitigation::SetActive(false);
+		bProxyDofMitigationHeld = false;
+	}
 	ShutdownStreaming();
 	UnregisterScene();
 	Super::BeginDestroy();
@@ -286,15 +303,40 @@ void AGaussianStreamedSceneActor::PostEditChangeProperty(FPropertyChangedEvent& 
 		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, bShowProxyMesh)
 		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, bProxyWriteCustomDepth)
 		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, bProxyWriteSceneDepth)
-		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, bProxyEnableCollision))
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, bProxyEnableCollision)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, ProxyDofMode)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, bProxyDofSuppressScreenSpaceAO)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, ProxyCustomDepthStencilValue))
 	{
+		if (PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, ProxyDofMode)
+			&& ProxyDofMode != EGaussianProxyDofMode::Off)
+		{
+			bProxyWriteCustomDepth = true;
+			bProxyWriteSceneDepth = false;
+		}
 		ApplyProxyMeshSettings();
+		SyncDepthOfFieldToScene();
+		SyncSceneSettings();
+		if (GaussianScene && GaussianScene->IsRegisteredWithRenderer())
+		{
+			FGaussianRenderer::Get().MarkSceneDirty(GaussianScene);
+		}
+	}
+	else if (PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, ProxyDofFocalDistanceCm)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, ProxyDofCocScale)
+		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, ProxyDofMaxBlurRadiusPx))
+	{
+		SyncSceneSettings();
+		if (GaussianScene && GaussianScene->IsRegisteredWithRenderer())
+		{
+			FGaussianRenderer::Get().MarkSceneDirty(GaussianScene);
+		}
 	}
 	else if (PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, bStreamingDebugDraw)
 		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, bStreamingDebugOverlay)
 		|| PropertyName == GET_MEMBER_NAME_CHECKED(AGaussianStreamedSceneActor, DebugRenderMode))
 	{
-		// Debug Render is a per-frame CVar tint — never restart streaming or rebuild proxies.
+		// Debug Render is a per-frame CVar tint �?never restart streaming or rebuild proxies.
 		ApplyStreamingCVarOverrides();
 		if (bStreamingDebugOverlay)
 		{
@@ -473,11 +515,36 @@ void AGaussianStreamedSceneActor::SnapActorToSceneOrigin()
 
 	// Do NOT snap to lod-meta SceneBounds.Origin: on some datasets that AABB is inconsistent with
 	// SOG position ranges (model near 0, tree.bound hundreds of meters away). SuperSplat centers
-	// the view on splat data, which is near the authoring origin — place the actor there too.
+	// the view on splat data, which is near the authoring origin �?place the actor there too.
 	const FVector TargetLocation = FVector::ZeroVector;
 	if (!GetActorLocation().Equals(TargetLocation, 1.0f))
 	{
 		SetActorLocation(TargetLocation, false, nullptr, ETeleportType::TeleportPhysics);
+	}
+}
+
+void AGaussianStreamedSceneActor::SyncDepthOfFieldToScene()
+{
+	const bool bWantDof = (ProxyDofMode != EGaussianProxyDofMode::Off) && ProxyMesh != nullptr;
+	const bool bWantMitigation = bWantDof && bProxyDofSuppressScreenSpaceAO;
+	if (bWantMitigation != bProxyDofMitigationHeld)
+	{
+		GaussianProxyDofMitigation::SetActive(bWantMitigation);
+		bProxyDofMitigationHeld = bWantMitigation;
+	}
+
+	if (!GaussianScene)
+	{
+		return;
+	}
+
+	if (GaussianScene->bUseProxyDepthOfField != bWantDof)
+	{
+		GaussianScene->bUseProxyDepthOfField = bWantDof;
+		if (GaussianScene->IsRegisteredWithRenderer())
+		{
+			FGaussianRenderer::Get().MarkSceneDirty(GaussianScene);
+		}
 	}
 }
 
@@ -488,27 +555,27 @@ void AGaussianStreamedSceneActor::ApplyProxyMeshSettings()
 		return;
 	}
 
+	// Plugin DOF: Custom Depth only. Write Scene Depth OFF (black skydome if early SceneDepth).
+	if (ProxyDofMode != EGaussianProxyDofMode::Off)
+	{
+		bProxyWriteCustomDepth = true;
+		bProxyWriteSceneDepth = false;
+	}
+
 	ProxyMeshComponent->SetStaticMesh(ProxyMesh);
 
-	// Show / collision / depth independent. Scene Depth can look like a black mesh via SSAO
-	// even when Show is off — see property tooltip; prefer Custom Depth for beauty pass.
-	const bool bWantsSceneDepth = bProxyWriteSceneDepth;
-	const bool bWantsCustomDepth = bProxyWriteCustomDepth;
-	const bool bWantsAnyDepthPass = bWantsSceneDepth || bWantsCustomDepth;
+	const bool bWantsCustomDepth = bProxyWriteCustomDepth || (ProxyDofMode != EGaussianProxyDofMode::Off);
+	const bool bEarlySceneDepth = bProxyWriteSceneDepth && ProxyDofMode == EGaussianProxyDofMode::Off;
+	const bool bWantsAnyDepthPass = bEarlySceneDepth || bWantsCustomDepth;
 	const bool bComponentActive = ProxyMesh != nullptr
-		&& (bShowProxyMesh || bWantsAnyDepthPass || bProxyEnableCollision);
+		&& (bShowProxyMesh || bWantsAnyDepthPass || bProxyEnableCollision || (ProxyDofMode != EGaussianProxyDofMode::Off));
 
 	ProxyMeshComponent->SetVisibility(bComponentActive);
 	ProxyMeshComponent->SetHiddenInGame(!bComponentActive);
-	ProxyMeshComponent->SetRenderInMainPass(bShowProxyMesh);
-	ProxyMeshComponent->bRenderInDepthPass = bShowProxyMesh || bWantsSceneDepth;
 	ProxyMeshComponent->SetRenderCustomDepth(bWantsCustomDepth);
-	ProxyMeshComponent->SetCustomDepthStencilValue(1);
-	ProxyMeshComponent->SetCastShadow(false);
-	ProxyMeshComponent->bCastContactShadow = false;
-	ProxyMeshComponent->bAffectDynamicIndirectLighting = bShowProxyMesh;
-	ProxyMeshComponent->bAffectDistanceFieldLighting = false;
-	ProxyMeshComponent->SetReceivesDecals(false);
+	ProxyMeshComponent->SetCustomDepthStencilValue(FMath::Clamp(ProxyCustomDepthStencilValue, 1, 255));
+	GaussianProxyDofMitigation::ConfigureDepthOnlyComponent(
+		ProxyMeshComponent, bShowProxyMesh, bEarlySceneDepth);
 
 	if (bProxyEnableCollision)
 	{
@@ -548,9 +615,42 @@ void AGaussianStreamedSceneActor::ApplyProxyMeshSettings()
 	}
 
 	ProxyMeshComponent->MarkRenderStateDirty();
+	SyncDepthOfFieldToScene();
 }
 
 #if WITH_EDITOR
+void AGaussianStreamedSceneActor::SetupDepthOfField()
+{
+	if (!ProxyMesh)
+	{
+		FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(
+			TEXT("Generate or assign a Proxy Mesh first.\n")
+			TEXT("DOF uses the proxy as Scene Depth geometry for Unreal Cinematic DOF.")));
+		return;
+	}
+
+	ProxyDofMode = EGaussianProxyDofMode::CineCamera;
+	bProxyWriteCustomDepth = true;
+	bProxyWriteSceneDepth = false;
+	bShowProxyMesh = false;
+	bProxyDofSuppressScreenSpaceAO = false;
+	ApplyProxyMeshSettings();
+	SyncDepthOfFieldToScene();
+
+	FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(
+		TEXT("DOF Mode = CineCamera (Engine Diaphragm DOF).\n\n")
+		TEXT("Configured:\n")
+		TEXT("- Write Custom Depth ON\n")
+		TEXT("- Write Scene Depth OFF (keeps sky clean)\n")
+		TEXT("- Gaussians inject BeforeDOF\n")
+		TEXT("- CustomDepth merged into SceneDepth just before engine DOF\n\n")
+		TEXT("On CineCamera:\n")
+		TEXT("- Enable Depth of Field (Cinematic)\n")
+		TEXT("- Set Focus Distance / Focus Target + Aperture\n\n")
+		TEXT("Console: r.CustomDepth 3 , r.DepthOfFieldQuality 2\n")
+		TEXT("Do NOT enable early Write Scene Depth.")));
+}
+
 void AGaussianStreamedSceneActor::GenerateProxyMeshFromDataset()
 {
 	if (!StreamedSceneAsset)
@@ -634,7 +734,7 @@ void AGaussianStreamedSceneActor::GenerateProxyMeshFromDataset()
 	const FBoxSphereBounds MeshBounds = Mesh->GetBounds();
 	const FString AutoGrowNote = (ActualVoxelCm > Settings.VoxelSizeCm + 0.5f)
 		? FString::Printf(
-			TEXT("\n(Auto-raised Voxel Size %.1f → %.1f cm: scene AABB too large for requested size.\n")
+			TEXT("\n(Auto-raised Voxel Size %.1f �?%.1f cm: scene AABB too large for requested size.\n")
 			TEXT(" Single Object max ~2048 cells/axis; Room/Outdoor also has dense cell budget.\n")
 			TEXT(" Uncheck Auto Grow Voxel Size to fail instead of growing.)"),
 			Settings.VoxelSizeCm, ActualVoxelCm)

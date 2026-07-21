@@ -38,12 +38,53 @@ public:
 	void SyncSceneProxies_RenderThread();
 	void CacheView_RenderThread(const FSceneView& View, const FIntRect& ViewportRect);
 	bool HasActiveScenes() const;
+
+	/** Any proxy DOF mode active (CineCamera or Plugin). */
+	bool WantsEngineDepthOfField() const;
+	/** CineCamera / Diaphragm DOF path (BeforeDOF + late CustomDepth merge). */
+	bool WantsCineCameraDepthOfField() const;
+	/** Plugin compute CoC blur path. */
+	bool WantsPluginDepthOfField() const;
+
 	FGaussianFrameResources BuildFrameResources_RenderThread(const FSceneView& View) const;
 	void RenderGaussiansForView(
 		FRDGBuilder& GraphBuilder,
 		const FSceneView& View,
 		FRDGTextureRef SceneColorTexture,
 		const FIntRect& SceneColorViewRect) const;
+
+	/**
+	 * Plugin CoC DOF after gaussians are composited. Uses proxy CustomDepth (not early SceneDepth).
+	 * Optional; CineCamera users should prefer BeforeDOF inject + late SceneDepth merge instead.
+	 */
+	void ApplyProxyDepthOfField_RenderThread(
+		FRDGBuilder& GraphBuilder,
+		const FSceneView& View,
+		FRDGTextureRef SceneColorTexture,
+		const FIntRect& SceneColorViewRect) const;
+
+	/**
+	 * Before engine Diaphragm/Cinematic DOF: write proxy CustomDepth (stencil-tagged) into the
+	 * SceneDepth texture that DOF samples — without early BasePass SceneDepth (sky stays clean).
+	 */
+	void MergeProxyCustomDepthIntoSceneDepth_RenderThread(
+		FRDGBuilder& GraphBuilder,
+		const FSceneView& View,
+		uint32 ProxyStencilValue = 1) const;
+
+	/** After gaussian raster: write soft DeviceZ into SceneDepth for near/far CoC falloff. */
+	void MergeGaussianSoftDepthIntoSceneDepth_RenderThread(
+		FRDGBuilder& GraphBuilder,
+		const FSceneView& View,
+		FRDGTextureRef SoftDepthBitsTexture,
+		const FIntRect& SoftDepthViewRect) const;
+
+	/** Aggregate DOF params from active scenes (first enabled wins / max blur). */
+	bool GetActiveDofSettings(
+		float& OutFocalDistanceCm,
+		float& OutCocScale,
+		float& OutMaxBlurRadiusPx,
+		uint32& OutProxyStencil) const;
 
 	bool IsInitialized() const { return bInitialized; }
 

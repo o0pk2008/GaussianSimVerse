@@ -44,6 +44,34 @@ public:
 		FGaussianFrameResources FrameResources;
 		FRDGTextureRef SceneColorTexture = nullptr;
 		FIntRect SceneColorViewRect;
+		/**
+		 * Absolute pixel origin of SceneDepth / CustomStencil in SceneTextures space
+		 * (usually ViewInfo.ViewRect.Min). May differ from SceneColorViewRect after late PP resolves.
+		 */
+		FIntPoint SceneDepthPixelOffset = FIntPoint::ZeroValue;
+		/** Engine SceneDepth (resolved) for occlusion vs opaque actors. */
+		FRDGTextureRef SceneDepthTexture = nullptr;
+		/** Custom-depth stencil SRV (proxy mesh stamps stencil for DOF exclude). */
+		FRDGTextureSRVRef CustomStencilSRV = nullptr;
+		/** View.InvDeviceZToWorldZTransform for DeviceZ → linear depth. */
+		FVector4f InvDeviceZToWorldZTransform = FVector4f(0, 0, 0, 0);
+		/** Occlude splats behind opaque SceneDepth (cm bias). */
+		bool bDepthOcclusion = true;
+		float DepthOcclusionBiasCm = 2.0f;
+		/**
+		 * When true, pixels whose Custom Stencil == ProxyStencilExclude skip depth occlusion
+		 * (proxy Scene Depth for DOF must not erase gaussians).
+		 */
+		bool bExcludeProxyStencilFromOcclusion = false;
+		uint32 ProxyStencilExclude = 1;
+
+		/**
+		 * CineCamera DOF: export per-pixel nearest splat DeviceZ (reverse-Z, larger = nearer)
+		 * so engine Diaphragm DOF can focus near vs far gaussians (not whole-cloud only).
+		 */
+		bool bExportSoftDepthForDof = false;
+		/** Optional out: R32_FLOAT DeviceZ, 0 = no gaussian. */
+		FRDGTextureRef* OutSoftDepthDeviceZ = nullptr;
 	};
 
 	static FGaussianRDGTransientResources AllocateTransientResources(FRDGBuilder& GraphBuilder);

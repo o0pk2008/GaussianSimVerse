@@ -17,6 +17,12 @@ FGaussianSceneProxy::FGaussianSceneProxy(const UGaussianScene* InScene)
 	Bounds = InScene->GetCombinedBounds();
 	TotalGaussianCount = InScene->GetTotalGaussianCount();
 	bEnableRendering = InScene->bEnableRendering;
+	DofMode = InScene->DofMode;
+	bUseProxyDepthOfField = InScene->bUseProxyDepthOfField || (InScene->DofMode != EGaussianProxyDofMode::Off);
+	DofFocalDistanceCm = InScene->DofFocalDistanceCm;
+	DofCocScale = InScene->DofCocScale;
+	DofMaxBlurRadiusPx = InScene->DofMaxBlurRadiusPx;
+	DofProxyStencil = InScene->DofProxyStencil;
 	SplatScale = InScene->SplatScale;
 	AlphaCullThreshold = InScene->AlphaCullThreshold;
 	CutoffK = InScene->CutoffK;

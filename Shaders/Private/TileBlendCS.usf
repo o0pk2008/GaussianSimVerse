@@ -45,7 +45,18 @@ float3 GaussianClrScaleRGB;
 float GaussianSaturation;
 float GaussianTransparencyMultiplier;
 uint StreamingDebugRenderMode;
+uint bDepthOcclusion;
+float DepthOcclusionBias;
+float4 InvDeviceZToWorldZTransform;
+int2 SceneColorOffset;
+int2 SceneDepthOffset;
+uint bUseProxyStencilExclude;
+uint ProxyStencilExclude;
+uint bWriteSoftDepth;
 StructuredBuffer<float> GaussianShCoeffs;
+Texture2D SceneDepthTexture;
+Texture2D CustomStencilTexture;
+RWTexture2D<uint> RWSoftDepthBits;
 
 #ifndef GAUSSIAN_TILE_BLEND_BATCH
 #define GAUSSIAN_TILE_BLEND_BATCH 1024
@@ -80,6 +91,7 @@ void ResolveSplatBinding(
 
 bool BlendTileSplat(
 	float2 PixelCenter,
+	int2 LocalPixel,
 	uint SortedIndex,
 	inout float3 AccumRgb,
 	inout float Transmittance)
@@ -102,6 +114,25 @@ bool BlendTileSplat(
 	ResolveSplatBinding(GaussianIndex, SplatLocalToWorld, BindingParams);
 
 	if (Splat.Opacity < BindingParams.AlphaCullThreshold)
+	{
+		return false;
+	}
+
+	const float4 ClipPosition = LocalToClipPosition(
+		Splat.Position, SplatLocalToWorld, PreViewTranslation, TranslatedWorldToClip);
+	const float SplatSceneDepth = max(ClipPosition.w, 1e-2);
+	const float SplatDeviceZ = GaussianClipToDeviceZ(ClipPosition);
+	const int2 SceneDepthPixel = LocalPixel + SceneDepthOffset;
+	if (GaussianIsOccludedBySceneDepth(
+		SceneDepthTexture,
+		CustomStencilTexture,
+		SceneDepthPixel,
+		SplatSceneDepth,
+		InvDeviceZToWorldZTransform,
+		DepthOcclusionBias,
+		bDepthOcclusion,
+		bUseProxyStencilExclude,
+		ProxyStencilExclude))
 	{
 		return false;
 	}
@@ -173,6 +204,7 @@ bool BlendTileSplat(
 
 	AccumRgb += Color * Alpha * Transmittance;
 	Transmittance *= (1.0 - Alpha);
+	GaussianWriteSoftDepthNearest(RWSoftDepthBits, LocalPixel, SplatDeviceZ, bWriteSoftDepth);
 	return true;
 }
 
@@ -218,7 +250,7 @@ void MainCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupThreadID)
 			{
 				continue;
 			}
-			BlendTileSplat(PixelCenter, Entry.y, AccumRgb, Transmittance);
+			BlendTileSplat(PixelCenter, Pixel, Entry.y, AccumRgb, Transmittance);
 			if (Transmittance < GaussianAlphaCutoff)
 			{
 				break;

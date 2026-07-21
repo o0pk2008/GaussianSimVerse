@@ -31,12 +31,23 @@ float3 GaussianClrScaleRGB;
 float GaussianSaturation;
 float GaussianTransparencyMultiplier;
 uint StreamingDebugRenderMode;
+uint bDepthOcclusion;
+float DepthOcclusionBias;
+float4 InvDeviceZToWorldZTransform;
+int2 SceneColorOffset;
+int2 SceneDepthOffset;
+uint bUseProxyStencilExclude;
+uint ProxyStencilExclude;
+uint bWriteSoftDepth;
 
 StructuredBuffer<uint> SortedIndices;
 StructuredBuffer<uint> VisibleCountBuffer;
 StructuredBuffer<float4> GaussianSplatsVec4;
 StructuredBuffer<float> GaussianShCoeffs;
+Texture2D SceneDepthTexture;
+Texture2D CustomStencilTexture;
 RWTexture2D<float4> RWOverlay;
+RWTexture2D<uint> RWSoftDepthBits;
 
 void BlendPremul(int2 Pixel, float3 Color, float Alpha)
 {
@@ -76,6 +87,11 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 		return;
 	}
 
+	const float4 ClipPosition = LocalToClipPosition(
+		Splat.Position, LocalToWorldMatrix, PreViewTranslation, TranslatedWorldToClip);
+	const float SplatSceneDepth = max(ClipPosition.w, 1e-2);
+	const float SplatDeviceZ = GaussianClipToDeviceZ(ClipPosition);
+
 	float2 ScreenCenter;
 	float3 InvConic;
 	float2 Extent;
@@ -112,6 +128,22 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 	{
 		for (int X = max(MinPixel.x, ViewMin.x); X <= min(MaxPixel.x, ViewMax.x); ++X)
 		{
+			const int2 LocalPixel = int2(X, Y);
+			const int2 SceneDepthPixel = LocalPixel + SceneDepthOffset;
+			if (GaussianIsOccludedBySceneDepth(
+				SceneDepthTexture,
+				CustomStencilTexture,
+				SceneDepthPixel,
+				SplatSceneDepth,
+				InvDeviceZToWorldZTransform,
+				DepthOcclusionBias,
+				bDepthOcclusion,
+				bUseProxyStencilExclude,
+				ProxyStencilExclude))
+			{
+				continue;
+			}
+
 			float Alpha = 1.0;
 			float3 Color = float3(1.0, 0.1, 0.8);
 
@@ -155,7 +187,8 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 				}
 			}
 
-			BlendPremul(int2(X, Y), Color, Alpha);
+			BlendPremul(LocalPixel, Color, Alpha);
+			GaussianWriteSoftDepthNearest(RWSoftDepthBits, LocalPixel, SplatDeviceZ, bWriteSoftDepth);
 		}
 	}
 }

@@ -211,10 +211,42 @@ namespace GaussianSimVerse::RenderSettings
 		TEXT("r.GaussianSimVerse.PostProcessPass"),
 		2,
 		TEXT("Which post-process pass injects Gaussian splats.\n")
-		TEXT("0: BeforeDOF (can ghost under TSR/TAA)\n")
+		TEXT("0: BeforeDOF (required for engine Cinematic DOF on gaussians)\n")
 		TEXT("1: AfterDOF (still affected by Motion Blur)\n")
-		TEXT("2: AfterMotionBlur (default — most stable while moving; like LUMA non-No_TAA path)"),
+		TEXT("2: AfterMotionBlur (default — most stable while moving; skips engine DOF)"),
 		ECVF_RenderThreadSafe);
+
+	TAutoConsoleVariable<int32> CVarAutoBeforeDofForProxyDof(
+		TEXT("r.GaussianSimVerse.AutoBeforeDofForProxyDof"),
+		1,
+		TEXT("When Enable Proxy Depth Of Field is on, force gaussian inject at BeforeDOF so\n")
+		TEXT("CineCamera / Diaphragm DOF can blur gaussians. Also merges CustomDepth→SceneDepth late.\n")
+		TEXT("0: Off (honor r.GaussianSimVerse.PostProcessPass; CineCamera DOF will miss gaussians)\n")
+		TEXT("1: On (default — required for CineCamera DOF on gaussians)"),
+		ECVF_RenderThreadSafe);
+
+	TAutoConsoleVariable<int32> CVarPluginDofBlur(
+		TEXT("r.GaussianSimVerse.PluginDofBlur"),
+		0,
+		TEXT("Extra plugin CoC blur after gaussian inject (CustomDepth-based).\n")
+		TEXT("0: Off (default) — use CineCamera / engine Diaphragm DOF only\n")
+		TEXT("1: On — also run plugin blur (can stack with engine DOF)"),
+		ECVF_RenderThreadSafe);
+
+	TAutoConsoleVariable<int32> CVarDepthOcclusion(
+		TEXT("r.GaussianSimVerse.DepthOcclusion"),
+		1,
+		TEXT("Occlude Gaussian splats behind opaque Unreal geometry using Scene Depth.\n")
+		TEXT("Without this, post-process gaussians always draw on top of regular actors.\n")
+		TEXT("0: Off\n")
+		TEXT("1: On (default)"),
+		ECVF_RenderThreadSafe | ECVF_Scalability);
+
+	TAutoConsoleVariable<float> CVarDepthOcclusionBias(
+		TEXT("r.GaussianSimVerse.DepthOcclusionBias"),
+		2.0f,
+		TEXT("Depth occlusion bias in cm (scene depth + bias vs splat Clip.w). Higher reduces edge flicker."),
+		ECVF_RenderThreadSafe | ECVF_Scalability);
 
 	TAutoConsoleVariable<int32> CVarPreferNonTemporalAA(
 		TEXT("r.GaussianSimVerse.PreferNonTemporalAA"),

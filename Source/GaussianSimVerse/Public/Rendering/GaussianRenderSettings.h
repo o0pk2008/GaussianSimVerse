@@ -35,6 +35,14 @@ namespace GaussianSimVerse::RenderSettings
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<float> CVarMinSigmaPixels;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarUseResolvedSceneColor;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarPostProcessPass;
+	/** When 1, scenes with proxy DOF force BeforeDOF inject even if PostProcessPass is 1/2. */
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarAutoBeforeDofForProxyDof;
+	/** When 1, also run plugin CoC blur after inject (optional; CineCamera usually enough). */
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarPluginDofBlur;
+	/** Occlude Gaussian pixels behind opaque scene depth (mix with regular actors). */
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarDepthOcclusion;
+	/** Extra cm added to scene depth before occlusion test (reduce edge z-fight). */
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<float> CVarDepthOcclusionBias;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarPreferNonTemporalAA;
 
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarStreamingEnable;
@@ -236,11 +244,25 @@ namespace GaussianSimVerse::RenderSettings
 		return FMath::Max(0.01f, CVarSplatScale.GetValueOnAnyThread());
 	}
 
-	/** 0 = BeforeDOF, 1 = AfterDOF */
+	/** 0 = BeforeDOF, 1 = AfterDOF, 2 = AfterMotionBlur (manual CVar only). */
 	FORCEINLINE int32 GetPostProcessPass()
 	{
-		// 0 BeforeDOF, 1 AfterDOF, 2 AfterMotionBlur
 		return FMath::Clamp(CVarPostProcessPass.GetValueOnAnyThread(), 0, 2);
+	}
+
+	FORCEINLINE bool IsAutoBeforeDofForProxyDofEnabled()
+	{
+		return CVarAutoBeforeDofForProxyDof.GetValueOnAnyThread() != 0;
+	}
+
+	FORCEINLINE bool IsDepthOcclusionEnabled()
+	{
+		return CVarDepthOcclusion.GetValueOnAnyThread() != 0;
+	}
+
+	FORCEINLINE float GetDepthOcclusionBiasCm()
+	{
+		return FMath::Max(0.0f, CVarDepthOcclusionBias.GetValueOnAnyThread());
 	}
 
 	/** 0 off, 1 force FXAA, 2 force None when gaussians active and view is TAA/TSR. */

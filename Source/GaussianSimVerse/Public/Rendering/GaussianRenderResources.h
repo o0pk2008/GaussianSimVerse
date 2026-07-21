@@ -34,6 +34,12 @@ struct GAUSSIANSIMVERSE_API FGaussianSceneProxy
 	FGaussianBounds Bounds;
 	uint32 TotalGaussianCount = 0;
 	bool bEnableRendering = true;
+	EGaussianProxyDofMode DofMode = EGaussianProxyDofMode::Off;
+	bool bUseProxyDepthOfField = false;
+	float DofFocalDistanceCm = 500.0f;
+	float DofCocScale = 0.004f;
+	float DofMaxBlurRadiusPx = 16.0f;
+	uint32 DofProxyStencil = 1;
 	float SplatScale = 1.0f;
 	float AlphaCullThreshold = 0.007843137f;
 	float CutoffK = 7.0f;

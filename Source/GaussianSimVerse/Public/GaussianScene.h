@@ -40,6 +40,24 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Gaussian")
 	bool bEnableRendering = true;
 
+	/** DOF mode for this scene (Off / CineCamera / Plugin). */
+	EGaussianProxyDofMode DofMode = EGaussianProxyDofMode::Off;
+
+	/** @deprecated Use DofMode != Off. Kept for proxy rebuild path. */
+	bool bUseProxyDepthOfField = false;
+
+	/** Plugin blur: focus plane distance in cm. */
+	float DofFocalDistanceCm = 500.0f;
+
+	/** Plugin blur: CoC strength. */
+	float DofCocScale = 0.004f;
+
+	/** Plugin blur: max blur radius in pixels. */
+	float DofMaxBlurRadiusPx = 16.0f;
+
+	/** Custom stencil ID of the proxy mesh used for CoC depth. */
+	uint32 DofProxyStencil = 1;
+
 	/** Driven by AGaussianSceneActor; not exposed in the actor details panel. */
 	float SplatScale = 1.0f;
 	float AlphaCullThreshold = 0.007843137f;

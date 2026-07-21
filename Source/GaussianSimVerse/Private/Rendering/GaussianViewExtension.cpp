@@ -3,6 +3,7 @@
 #include "Rendering/GaussianViewExtension.h"
 #include "Rendering/GaussianRenderer.h"
 #include "Rendering/GaussianRenderSettings.h"
+#include "GaussianTypes.h"
 #include "PostProcess/PostProcessMaterialInputs.h"
 #include "SceneUtils.h"
 #include "SceneView.h"
@@ -22,7 +23,6 @@ void FGaussianViewExtension::SetupViewFamily(FSceneViewFamily& InViewFamily)
 void FGaussianViewExtension::SetupView(FSceneViewFamily& InViewFamily, FSceneView& InView)
 {
 	// TAA/TSR reprojects scene color without Gaussian velocity → smear while moving.
-	// When gaussians are registered, optionally force non-temporal AA for this view only.
 	const int32 PreferMode = GaussianSimVerse::RenderSettings::GetPreferNonTemporalAAMode();
 	if (PreferMode <= 0
 		|| !GaussianSimVerse::RenderSettings::IsRenderingEnabled()
@@ -51,7 +51,6 @@ void FGaussianViewExtension::PreRenderView_RenderThread(FRDGBuilder& GraphBuilde
 
 namespace GaussianViewExtensionPrivate
 {
-	/** Mirror engine MotionBlur gate enough to choose AfterDOF fallback when MB will not run. */
 	static bool WillMotionBlurPassRun(const FSceneView& View)
 	{
 		if (!View.Family)
@@ -81,23 +80,26 @@ void FGaussianViewExtension::SubscribeToPostProcessingPass(
 		return;
 	}
 
-	// Injection order:
-	// 0 BeforeDOF — early; can ghost under TSR/TAA
-	// 1 AfterDOF — still goes through Motion Blur (camera smear on splats)
-	// 2 AfterMotionBlur preferred — but when MB is OFF (common in editor), that pass never
-	//   enables callbacks, so we MUST fall back to AfterDOF or gaussians disappear entirely.
-	const int32 DesiredPass = GaussianSimVerse::RenderSettings::GetPostProcessPass();
-	bool bSubscribe = false;
+	// CineCamera DOF: must inject at BeforeDOF (extension runs immediately before DiaphragmDOF).
+	// Plugin DOF: inject AfterDOF/MB then compute blur (default pass is fine).
+	int32 DesiredPass = GaussianSimVerse::RenderSettings::GetPostProcessPass();
+	if (Renderer.WantsCineCameraDepthOfField()
+		&& GaussianSimVerse::RenderSettings::IsAutoBeforeDofForProxyDofEnabled())
+	{
+		DesiredPass = 0;
+	}
 
+	bool bSubscribe = false;
 	if (DesiredPass == 0)
 	{
-		bSubscribe = bIsPassEnabled && PassId == EPostProcessingPass::BeforeDOF;
+		// BeforeDOF extension chain runs even when bIsPassEnabled is false on some builds.
+		bSubscribe = (PassId == EPostProcessingPass::BeforeDOF);
 	}
 	else if (DesiredPass == 1)
 	{
 		bSubscribe = bIsPassEnabled && PassId == EPostProcessingPass::AfterDOF;
 	}
-	else // DesiredPass == 2
+	else
 	{
 		const bool bMotionBlurWillRun = GaussianViewExtensionPrivate::WillMotionBlurPassRun(InView);
 		if (bMotionBlurWillRun)
@@ -106,7 +108,6 @@ void FGaussianViewExtension::SubscribeToPostProcessingPass(
 		}
 		else
 		{
-			// Editor / MB disabled: inject after DOF so splats still appear.
 			bSubscribe = bIsPassEnabled && PassId == EPostProcessingPass::AfterDOF;
 		}
 	}
@@ -134,7 +135,20 @@ FScreenPassTexture FGaussianViewExtension::InjectGaussiansPostProcess_RenderThre
 		return Inputs.ReturnUntouchedSceneColorForPostProcessing(GraphBuilder);
 	}
 
+	const bool bPlugin = Renderer.WantsPluginDepthOfField();
+
+	// CineCamera: inject before DiaphragmDOF (AutoBeforeDof). Progressive CoC uses soft nearest-
+	// splat DeviceZ merged into SceneDepth after raster — not proxy CustomDepth (hull flattens CoC).
+	// Focus / aperture: CineCamera actor, not plugin sliders.
 	Renderer.RenderGaussiansForView(GraphBuilder, View, SceneColor.Texture, SceneColor.ViewRect);
+
+	// Plugin path: custom CoC blur after inject; not driven by CineCamera focus.
+	if (bPlugin)
+	{
+		Renderer.ApplyProxyDepthOfField_RenderThread(
+			GraphBuilder, View, SceneColor.Texture, SceneColor.ViewRect);
+	}
+
 	return SceneColor;
 }
 

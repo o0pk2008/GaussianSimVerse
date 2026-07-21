@@ -511,6 +511,88 @@ float ComputeGaussianViewDepth(float3 WorldPosition, float3 CameraViewDirection)
 	return dot(WorldPosition, normalize(CameraViewDirection));
 }
 
+/**
+ * Linear scene depth from the engine depth buffer (UE ConvertFromDeviceZ without View cbuffer).
+ * Pass View.InvDeviceZToWorldZTransform from C++.
+ */
+float GaussianConvertFromDeviceZ(float DeviceZ, float4 InvDeviceZToWorldZTransform)
+{
+	const float Denom = DeviceZ * InvDeviceZToWorldZTransform.z - InvDeviceZToWorldZTransform.w;
+	return DeviceZ * InvDeviceZToWorldZTransform.x
+		+ InvDeviceZToWorldZTransform.y
+		+ 1.0 / max(abs(Denom), 1e-6) * (Denom < 0.0 ? -1.0 : 1.0);
+}
+
+/** Clip-space → DeviceZ (UE reverse-Z: nearer samples tend to be larger). */
+float GaussianClipToDeviceZ(float4 ClipPosition)
+{
+	return saturate(ClipPosition.z / max(ClipPosition.w, 1e-6));
+}
+
+/** Keep nearest DeviceZ (reverse-Z → InterlockedMax on float bits for positive values). */
+void GaussianWriteSoftDepthNearest(RWTexture2D<uint> RWSoftDepthBits, int2 Pixel, float DeviceZ, uint bEnable)
+{
+	if (bEnable == 0u || DeviceZ <= 1e-8)
+	{
+		return;
+	}
+	uint Unused = 0;
+	InterlockedMax(RWSoftDepthBits[Pixel], asuint(DeviceZ), Unused);
+}
+
+/**
+ * True when the splat center is behind opaque scene geometry at this pixel.
+ * SplatSceneDepth should match UE primary depth (perspective ClipPosition.w).
+ * ScenePixel is in full SceneDepth texture coordinates (LocalPixel + SceneDepthOffset).
+ *
+ * ProxyStencilExclude: when >0 and CustomStencil equals this value (proxy mesh stencil),
+ * skip occlusion — proxy Scene Depth is for DOF CoC only and must NOT self-occlude gaussians
+ * (otherwise you see black blocky holes matching the proxy voxels).
+ */
+bool GaussianIsOccludedBySceneDepth(
+	Texture2D SceneDepthTexture,
+	Texture2D CustomStencilTexture,
+	int2 ScenePixel,
+	float SplatSceneDepth,
+	float4 InvDeviceZToWorldZTransform,
+	float DepthBias,
+	uint bEnable,
+	uint bUseProxyStencilExclude,
+	uint ProxyStencilExclude)
+{
+	if (bEnable == 0u)
+	{
+		return false;
+	}
+
+	// Proxy DOF stamps Custom Stencil. Do not depth-kill gaussians against the proxy shell itself
+	// (that caused black voxel holes). Real actors keep stencil 0 → still occlude.
+	if (bUseProxyStencilExclude != 0u && ProxyStencilExclude > 0u)
+	{
+		const uint Stencil = (uint)CustomStencilTexture.Load(int3(ScenePixel, 0)).g;
+		if (Stencil == ProxyStencilExclude)
+		{
+			return false;
+		}
+	}
+
+	const float DeviceZ = SceneDepthTexture.Load(int3(ScenePixel, 0)).r;
+	// Empty / sky / unwritten depth: do not occlude (let gaussians draw).
+	// Reverse-Z: far plane approaches 0.
+	if (DeviceZ <= 1e-8)
+	{
+		return false;
+	}
+	const float SceneDepth = GaussianConvertFromDeviceZ(DeviceZ, InvDeviceZToWorldZTransform);
+	// Invalid linearization (can happen with dummy depth) → do not occlude.
+	if (!(SceneDepth > 0.0) || SceneDepth > 1e8)
+	{
+		return false;
+	}
+	// Farther splat than opaque surface → occluded (keeps boxes visible inside the cloud).
+	return SplatSceneDepth > (SceneDepth + max(DepthBias, 0.0));
+}
+
 float ComputeGaussianViewDepth01(float ViewDepth, float ViewDepthMin, float ViewDepthMax)
 {
 	return saturate((ViewDepth - ViewDepthMin) / max(ViewDepthMax - ViewDepthMin, 1e-6));

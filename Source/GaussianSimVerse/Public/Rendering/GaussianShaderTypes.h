@@ -421,6 +421,13 @@ public:
 		SHADER_PARAMETER(float, GaussianSaturation)
 		SHADER_PARAMETER(float, GaussianTransparencyMultiplier)
 		SHADER_PARAMETER(uint32, StreamingDebugRenderMode)
+		SHADER_PARAMETER(uint32, bDepthOcclusion)
+		SHADER_PARAMETER(float, DepthOcclusionBias)
+		SHADER_PARAMETER(FVector4f, InvDeviceZToWorldZTransform)
+		SHADER_PARAMETER(FIntPoint, SceneColorOffset)
+		SHADER_PARAMETER(FIntPoint, SceneDepthOffset)
+		SHADER_PARAMETER(uint32, bUseProxyStencilExclude)
+		SHADER_PARAMETER(uint32, ProxyStencilExclude)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, TileOffsets)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, TileCounts)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint2>, TileSplats)
@@ -430,7 +437,11 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, ChunkBindingParams)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, GaussianSplatsVec4)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, GaussianShCoeffs)
+		SHADER_PARAMETER(uint32, bWriteSoftDepth)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SceneDepthTexture)
+		SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D, CustomStencilTexture)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWOverlay)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, RWSoftDepthBits)
 	END_SHADER_PARAMETER_STRUCT()
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
@@ -467,6 +478,13 @@ BEGIN_SHADER_PARAMETER_STRUCT(FGaussianSplatDrawSharedParameters, )
 	SHADER_PARAMETER(float, GaussianTransparencyMultiplier)
 	SHADER_PARAMETER(uint32, StreamingDebugRenderMode)
 	SHADER_PARAMETER(uint32, bUseGlobalChunkLookup)
+	SHADER_PARAMETER(uint32, bDepthOcclusion)
+	SHADER_PARAMETER(float, DepthOcclusionBias)
+	SHADER_PARAMETER(FVector4f, InvDeviceZToWorldZTransform)
+	SHADER_PARAMETER(FIntPoint, SceneColorOffset)
+	SHADER_PARAMETER(FIntPoint, SceneDepthOffset)
+	SHADER_PARAMETER(uint32, bUseProxyStencilExclude)
+	SHADER_PARAMETER(uint32, ProxyStencilExclude)
 	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, SortedIndices)
 	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, VisibleCountBuffer)
 	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, BindingIds)
@@ -474,6 +492,8 @@ BEGIN_SHADER_PARAMETER_STRUCT(FGaussianSplatDrawSharedParameters, )
 	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, ChunkBindingParams)
 	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, GaussianSplatsVec4)
 	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, GaussianShCoeffs)
+	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SceneDepthTexture)
+	SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D, CustomStencilTexture)
 END_SHADER_PARAMETER_STRUCT()
 
 /** Instanced screen-space splat quads — hardware raster (SuperSplat-style global draw). */
@@ -538,11 +558,22 @@ public:
 		SHADER_PARAMETER(float, GaussianSaturation)
 		SHADER_PARAMETER(float, GaussianTransparencyMultiplier)
 		SHADER_PARAMETER(uint32, StreamingDebugRenderMode)
+		SHADER_PARAMETER(uint32, bDepthOcclusion)
+		SHADER_PARAMETER(float, DepthOcclusionBias)
+		SHADER_PARAMETER(FVector4f, InvDeviceZToWorldZTransform)
+		SHADER_PARAMETER(FIntPoint, SceneColorOffset)
+		SHADER_PARAMETER(FIntPoint, SceneDepthOffset)
+		SHADER_PARAMETER(uint32, bUseProxyStencilExclude)
+		SHADER_PARAMETER(uint32, ProxyStencilExclude)
+		SHADER_PARAMETER(uint32, bWriteSoftDepth)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, SortedIndices)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, VisibleCountBuffer)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, GaussianSplatsVec4)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float>, GaussianShCoeffs)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SceneDepthTexture)
+		SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D, CustomStencilTexture)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWOverlay)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, RWSoftDepthBits)
 	END_SHADER_PARAMETER_STRUCT()
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
@@ -562,6 +593,76 @@ public:
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<uint>, AccumPremulG)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<uint>, AccumPremulB)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWOverlay)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
+};
+
+/**
+ * Fullscreen: write SceneDepth from CustomDepth where CustomStencil matches the proxy stencil.
+ * Color RT is a dummy (CW_NONE) so D3D12 accepts the graphics PSO.
+ */
+class GAUSSIANSIMVERSE_API FGaussianProxyDepthMergePS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FGaussianProxyDepthMergePS);
+	SHADER_USE_PARAMETER_STRUCT(FGaussianProxyDepthMergePS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, CustomDepthTexture)
+		SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D, CustomStencilTexture)
+		SHADER_PARAMETER(uint32, ProxyStencil)
+		SHADER_PARAMETER(uint32, bHasCustomStencil)
+		RENDER_TARGET_BINDING_SLOTS()
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
+};
+
+/** Fullscreen: write SceneDepth from gaussian soft DeviceZ bits (reverse-Z, 0 = empty). */
+class GAUSSIANSIMVERSE_API FGaussianSoftDepthMergePS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FGaussianSoftDepthMergePS);
+	SHADER_USE_PARAMETER_STRUCT(FGaussianSoftDepthMergePS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<uint>, SoftDepthBitsTexture)
+		SHADER_PARAMETER(FIntPoint, SoftDepthOffset)
+		RENDER_TARGET_BINDING_SLOTS()
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
+};
+
+/** Separable CoC blur: CustomDepth (proxy stencil) / SceneDepth hybrid — no early SceneDepth write. */
+class GAUSSIANSIMVERSE_API FGaussianDofCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FGaussianDofCS);
+	SHADER_USE_PARAMETER_STRUCT(FGaussianDofCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER(FVector4f, ViewRect)
+		SHADER_PARAMETER(FIntPoint, TextureSize)
+		SHADER_PARAMETER(FVector2f, BlurDirection)
+		SHADER_PARAMETER(float, FocalDistanceCm)
+		SHADER_PARAMETER(float, CocScale)
+		SHADER_PARAMETER(float, MaxBlurRadiusPx)
+		SHADER_PARAMETER(FVector4f, InvDeviceZToWorldZTransform)
+		SHADER_PARAMETER(uint32, ProxyStencil)
+		SHADER_PARAMETER(uint32, bHasCustomStencil)
+		SHADER_PARAMETER(uint32, bHasCustomDepth)
+		SHADER_PARAMETER(uint32, bHasSceneDepth)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SceneColorTexture)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SceneDepthTexture)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, CustomDepthTexture)
+		// Prefer Texture2D (not uint2) so binding PF_X24_G8 / dummy views does not mismatch HLSL type.
+		SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D, CustomStencilTexture)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWOutput)
 	END_SHADER_PARAMETER_STRUCT()
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);

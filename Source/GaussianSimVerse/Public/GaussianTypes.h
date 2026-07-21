@@ -54,6 +54,29 @@ enum class EGaussianProxyMeshMode : uint8
 	Smooth UMETA(DisplayName = "Surface Smooth (Laplacian)"),
 };
 
+/**
+ * How proxy DOF is applied to gaussians.
+ * CineCamera = inject BeforeDOF + late CustomDepth→SceneDepth (use Focus on CineCamera).
+ * Plugin = custom CoC blur after inject (does not use CineCamera aperture/focus).
+ */
+UENUM(BlueprintType)
+enum class EGaussianProxyDofMode : uint8
+{
+	/** No extra DOF wiring for gaussians. */
+	Off UMETA(DisplayName = "Off"),
+	/**
+	 * CineCamera / engine Diaphragm DOF.
+	 * Gaussians inject BeforeDOF; proxy CustomDepth is merged into SceneDepth late (sky-safe).
+	 * Adjust focus on the CineCamera — do NOT enable early Write Scene Depth.
+	 */
+	CineCamera UMETA(DisplayName = "CineCamera (Engine DOF)"),
+	/**
+	 * Plugin CoC blur after gaussians draw (CustomDepth only).
+	 * Not controlled by CineCamera focus/aperture.
+	 */
+	Plugin UMETA(DisplayName = "Plugin Blur"),
+};
+
 constexpr int32 GaussianShRestCoefficientCount = 45;
 constexpr int32 GaussianShDcCoefficientCount = 3;
 constexpr int32 GaussianShCoefficientsPerSplat = GaussianShDcCoefficientCount + GaussianShRestCoefficientCount;

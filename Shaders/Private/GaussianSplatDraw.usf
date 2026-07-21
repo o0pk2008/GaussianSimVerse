@@ -34,6 +34,13 @@ float GaussianSaturation;
 float GaussianTransparencyMultiplier;
 uint StreamingDebugRenderMode;
 uint bUseGlobalChunkLookup;
+uint bDepthOcclusion;
+float DepthOcclusionBias;
+float4 InvDeviceZToWorldZTransform;
+int2 SceneColorOffset;
+int2 SceneDepthOffset;
+uint bUseProxyStencilExclude;
+uint ProxyStencilExclude;
 StructuredBuffer<uint> SortedIndices;
 StructuredBuffer<uint> VisibleCountBuffer;
 StructuredBuffer<uint> BindingIds;
@@ -41,6 +48,8 @@ StructuredBuffer<float4> ChunkMatrixRows;
 StructuredBuffer<float4> ChunkBindingParams;
 StructuredBuffer<float4> GaussianSplatsVec4;
 StructuredBuffer<float> GaussianShCoeffs;
+Texture2D SceneDepthTexture;
+Texture2D CustomStencilTexture;
 
 float4x4 LoadChunkMatrix(uint BindingIndex)
 {
@@ -56,6 +65,7 @@ struct FGaussianSplatVSToPS
 	nointerpolation float3 Color : TEXCOORD3;
 	nointerpolation float CutoffK : TEXCOORD4;
 	nointerpolation float TransparencyMultiplier : TEXCOORD5;
+	nointerpolation float SplatSceneDepth : TEXCOORD6;
 };
 
 float2 ScreenPixelToClip(float2 ScreenPixel)
@@ -86,6 +96,7 @@ void MainVS(
 	Output.InvConic = 0.0;
 	Output.EffectiveOpacity = 0.0;
 	Output.Color = 0.0;
+	Output.SplatSceneDepth = 0.0;
 
 	const uint SortedIndex = BatchStart + InstanceId;
 	const uint VisibleCount = min(SortedCount, VisibleCountBuffer[0]);
@@ -174,12 +185,16 @@ void MainVS(
 	const float2 ScreenPos = ScreenCenter + Corner * Extent;
 	const float2 ClipXY = ScreenPixelToClip(ScreenPos);
 
+	const float4 ClipPosition = LocalToClipPosition(
+		Splat.Position, SplatLocalToWorld, PreViewTranslation, TranslatedWorldToClip);
+
 	Output.Position = float4(ClipXY, 0.0, 1.0);
 	Output.ScreenCenter = ScreenCenter;
 	Output.InvConic = InvConic;
 	Output.EffectiveOpacity = EffectiveOpacity;
 	Output.CutoffK = LocalCutoffK;
 	Output.TransparencyMultiplier = LocalTransparencyMultiplier;
+	Output.SplatSceneDepth = max(ClipPosition.w, 1e-2);
 
 	if (bDebugOverlay != 0u)
 	{
@@ -218,6 +233,22 @@ float4 MainPS(FGaussianSplatVSToPS Input) : SV_Target0
 	}
 
 	const float2 PixelCenter = Input.Position.xy;
+	const int2 LocalPixel = int2(floor(PixelCenter));
+	const int2 SceneDepthPixel = LocalPixel + SceneDepthOffset;
+	if (GaussianIsOccludedBySceneDepth(
+		SceneDepthTexture,
+		CustomStencilTexture,
+		SceneDepthPixel,
+		Input.SplatSceneDepth,
+		InvDeviceZToWorldZTransform,
+		DepthOcclusionBias,
+		bDepthOcclusion,
+		bUseProxyStencilExclude,
+		ProxyStencilExclude))
+	{
+		discard;
+	}
+
 	const float Alpha = EvaluateSplatAlphaEllipse(
 		PixelCenter,
 		Input.ScreenCenter,
@@ -231,5 +262,6 @@ float4 MainPS(FGaussianSplatVSToPS Input) : SV_Target0
 		discard;
 	}
 
+	// Soft depth for DOF is written on compute raster paths (Tile/RasterCS), not graphics PS.
 	return float4(Input.Color * Alpha, Alpha);
 }

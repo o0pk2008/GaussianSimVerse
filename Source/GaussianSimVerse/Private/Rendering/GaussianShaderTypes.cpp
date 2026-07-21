@@ -131,6 +131,45 @@ void FGaussianTileBlendCS::ModifyCompilationEnvironment(const FGlobalShaderPermu
 	OutEnvironment.CompilerFlags.Add(CFLAG_StandardOptimization);
 }
 
+IMPLEMENT_GLOBAL_SHADER(FGaussianProxyDepthMergePS, "/Plugin/GaussianSimVerse/Private/ProxyDepthMerge.usf", "MainPS", SF_Pixel);
+
+bool FGaussianProxyDepthMergePS::ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+{
+	return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+}
+
+void FGaussianProxyDepthMergePS::ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+{
+	FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+	OutEnvironment.CompilerFlags.Add(CFLAG_StandardOptimization);
+}
+
+IMPLEMENT_GLOBAL_SHADER(FGaussianSoftDepthMergePS, "/Plugin/GaussianSimVerse/Private/SoftDepthMerge.usf", "MainPS", SF_Pixel);
+
+bool FGaussianSoftDepthMergePS::ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+{
+	return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+}
+
+void FGaussianSoftDepthMergePS::ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+{
+	FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+	OutEnvironment.CompilerFlags.Add(CFLAG_StandardOptimization);
+}
+
+IMPLEMENT_GLOBAL_SHADER(FGaussianDofCS, "/Plugin/GaussianSimVerse/Private/GaussianDof.usf", "MainCS", SF_Compute);
+
+bool FGaussianDofCS::ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+{
+	return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+}
+
+void FGaussianDofCS::ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+{
+	FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+	OutEnvironment.CompilerFlags.Add(CFLAG_StandardOptimization);
+}
+
 IMPLEMENT_GLOBAL_SHADER(FGaussianCompositeCS, "/Plugin/GaussianSimVerse/Private/CompositeCS.usf", "MainCS", SF_Compute);
 
 bool FGaussianCompositeCS::ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
