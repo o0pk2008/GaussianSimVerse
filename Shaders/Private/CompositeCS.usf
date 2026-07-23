@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
-// Composite Gaussian overlay onto resolved scene color (single pass, no MSAA corruption).
-// Optional PlayCanvas-style relighting: multiply overlay by screen-aligned lit-proxy map.
+// Composite Gaussian overlay onto SceneColor.
+// Overlay is LINEAR premultiplied (multi-splat accumulated with soft Gaussian alpha).
+// Pre-tonemap: Premul*PreExposure over HDR SceneColor (engine tonemap finishes the look).
+// After-tonemap: filmic-map unpremul color, then soft over onto display SceneColor.
 
 #include "/Engine/Public/Platform.ush"
 
@@ -8,6 +10,8 @@ float4 ViewRect;
 int2 SceneColorOffset;
 uint bRelightEnabled;
 uint bRelightDebug;
+uint bAfterTonemap;
+float PreExposure;
 float RelightBlend;
 float RelightExposure;
 float RelightBrightness;
@@ -23,7 +27,18 @@ float Luma(float3 C)
 	return dot(C, float3(0.2126, 0.7152, 0.0722));
 }
 
-// Lit proxy map → modulate factor. Coverage from alpha OR luminance.
+// Cheap ACES-style filmic curve (matches common game tonemappers better than pure gamma).
+float3 AcesFilmic(float3 X)
+{
+	X = max(X, 0.0);
+	const float A = 2.51;
+	const float B = 0.03;
+	const float C = 2.43;
+	const float D = 0.59;
+	const float E = 0.14;
+	return saturate((X * (A * X + B)) / (X * (C * X + D) + E));
+}
+
 void SampleRelight(float2 Uv, out float3 OutFactor, out float OutCoverage, out float3 OutLitRgb)
 {
 	const float4 Lit = RelightTexture.SampleLevel(RelightSampler, Uv, 0);
@@ -74,16 +89,29 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 	const float4 Overlay = OverlayTexture[LocalPixel];
 	const float2 Uv = (float2(LocalPixel) + 0.5) / max(float2(ViewSize), float2(1.0, 1.0));
 
-	// --- Normal gaussian composite (with optional relight modulate) ---
 	const float Alpha = saturate(Overlay.a);
 	float3 OutRgb = Scene.rgb;
 	if (Alpha > (1.0 / 255.0))
 	{
-		const float3 Premul = ApplyRelightFactor(Overlay.rgb, Alpha, Uv);
-		OutRgb = Premul + Scene.rgb * (1.0 - Alpha);
+		// Soft multi-splat coverage is entirely in Overlay.a / premul RGB (linear).
+		const float3 PremulLin = ApplyRelightFactor(Overlay.rgb, Alpha, Uv);
+		const float Exposure = max(PreExposure, 1e-4);
+
+		if (bAfterTonemap != 0u)
+		{
+			// Display SceneColor: filmic-map the average linear color, keep soft alpha as-is.
+			// Do NOT pow() the blended sum — that destroys soft tails and creates hard contours.
+			const float3 ColorLin = (PremulLin * Exposure) / max(Alpha, 1e-4);
+			const float3 ColorDisp = AcesFilmic(ColorLin);
+			OutRgb = ColorDisp * Alpha + Scene.rgb * (1.0 - Alpha);
+		}
+		else
+		{
+			// Pre-tonemap HDR SceneColor (already PreExposed by the engine): match space.
+			OutRgb = PremulLin * Exposure + Scene.rgb * (1.0 - Alpha);
+		}
 	}
 
-	// Debug: bottom-right inset of lit-proxy mesh only (does NOT replace the whole frame).
 	if (bRelightDebug != 0u && bRelightEnabled != 0u)
 	{
 		const int2 InsetSize = max(ViewSize / 3, int2(160, 120));
@@ -94,7 +122,6 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 		if (LocalPixel.x >= InsetMin.x && LocalPixel.y >= InsetMin.y
 			&& LocalPixel.x < InsetMax.x && LocalPixel.y < InsetMax.y)
 		{
-			// 2px cyan border so the window is obvious.
 			const bool bBorder =
 				LocalPixel.x < InsetMin.x + 2 || LocalPixel.y < InsetMin.y + 2
 				|| LocalPixel.x >= InsetMax.x - 2 || LocalPixel.y >= InsetMax.y - 2;
@@ -110,18 +137,23 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 			float Coverage;
 			float3 LitRgb;
 			SampleRelight(saturate(DebugUv), Factor, Coverage, LitRgb);
-			// Full-scene lighting buffer preview (includes box shadows on proxy). Empty = magenta.
 			const float3 EmptyTint = float3(0.15, 0.02, 0.1);
-			const float3 DebugRgb = (Luma(LitRgb) > 1e-4 || Coverage > 0.01)
+			float3 DebugRgb = (Luma(LitRgb) > 1e-4 || Coverage > 0.01)
 				? (LitRgb * RelightBrightness * RelightExposure)
 				: EmptyTint;
+			if (bAfterTonemap != 0u)
+			{
+				DebugRgb = AcesFilmic(DebugRgb * max(PreExposure, 1e-4));
+			}
+			else
+			{
+				DebugRgb *= max(PreExposure, 1e-4);
+			}
 			RWSceneColor[ScenePixel] = float4(DebugRgb, Scene.a);
 			return;
 		}
 	}
 
-	if (Alpha > (1.0 / 255.0))
-	{
-		RWSceneColor[ScenePixel] = float4(OutRgb, Scene.a);
-	}
+	// Always write view pixels so a failed sample is visible and non-splat pixels keep Scene.
+	RWSceneColor[ScenePixel] = float4(OutRgb, Scene.a);
 }

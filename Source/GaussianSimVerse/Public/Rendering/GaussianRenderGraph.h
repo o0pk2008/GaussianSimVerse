@@ -81,7 +81,62 @@ public:
 		float RelightExposure = 1.0f;
 		float RelightBrightness = 2.0f;
 		float RelightBackground = 1.0f;
+
+		/**
+		 * If set, filled with the SceneColor RT after composite (safe for PP chain).
+		 * Never UAV-writes the input SceneColor in-place (breaks PIE / some editor paths).
+		 */
+		FRDGTextureRef* OutCompositedSceneColor = nullptr;
+		/** Optional pre-allocated output (e.g. OverrideOutput after tonemap). */
+		FRDGTextureRef PreferredOutputTexture = nullptr;
+		/**
+		 * When true, final composite targets after-tonemap display-referred SceneColor.
+		 * Splat raster always accumulates in linear; CompositeCS then blends in linear and encodes.
+		 */
+		bool bAfterTonemap = false;
+
+		/**
+		 * Pipeline mode for split inject (CineCamera DOF + correct PIE exposure):
+		 *  Full — raster + composite (default)
+		 *  SoftDepthAndOverlay — raster + soft depth only; no SceneColor composite (AE-safe)
+		 *  CompositeOnly — composite ExternalOverlay onto SceneColor (no re-raster)
+		 */
+		enum class EInjectMode : uint8
+		{
+			Full = 0,
+			SoftDepthAndOverlay,
+			CompositeOnly,
+		};
+		EInjectMode InjectMode = EInjectMode::Full;
+
+		/** SoftDepthAndOverlay: filled with the view-local premultiplied overlay. */
+		FRDGTextureRef* OutOverlayTexture = nullptr;
+		/** SoftDepthAndOverlay: absolute pixel origin used by CompositeCS SceneColorOffset. */
+		FIntPoint* OutSceneColorOffset = nullptr;
+
+		/** CompositeOnly: previously rasterized overlay (same GraphBuilder frame). */
+		FRDGTextureRef ExternalOverlayTexture = nullptr;
+		/** CompositeOnly: SceneColorOffset used when the overlay was built. */
+		FIntPoint ExternalSceneColorOffset = FIntPoint::ZeroValue;
 	};
+
+	/** Composite a premultiplied linear overlay onto SceneColor (new RT or PreferredOutput). */
+	static FRDGTextureRef AddCompositePass(
+		FRDGBuilder& GraphBuilder,
+		FRDGTextureRef SceneColorTexture,
+		FRDGTextureRef OverlayTexture,
+		const FIntRect& SceneColorViewRect,
+		FIntPoint SceneColorOffset,
+		FRDGTextureRef PreferredOutputTexture,
+		bool bRelightEnabled,
+		bool bRelightDebug,
+		float RelightBlend,
+		float RelightExposure,
+		float RelightBrightness,
+		float RelightBackground,
+		FRDGTextureRef RelightTexture,
+		bool bAfterTonemap = false,
+		float PreExposure = 1.0f);
 
 	static FGaussianRDGTransientResources AllocateTransientResources(FRDGBuilder& GraphBuilder);
 	static void AddPasses(FRDGBuilder& GraphBuilder, const FPassInputs& Inputs, FGaussianRDGTransientResources& TransientResources);

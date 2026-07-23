@@ -412,20 +412,19 @@ void AGaussianSceneActor::ApplyProxyMeshSettings()
 		return;
 	}
 
-	// Plugin DOF uses Custom Depth only. NEVER enable early Write Scene Depth for DOF
-	// (that blocks the skydome �?black voxel grid + engine sky warning).
+	// NEVER early-write SceneDepth for beauty (blocks skydome → black sky). Sensors only.
 	if (ProxyDofMode != EGaussianProxyDofMode::Off)
 	{
 		bProxyWriteCustomDepth = true;
-		bProxyWriteSceneDepth = false; // forced off for beauty DOF
 	}
+	// Beauty path always keeps this off (relighting must not re-enable it either).
+	bProxyWriteSceneDepth = false;
 
 	ProxyMeshComponent->SetStaticMesh(ProxyMesh);
 
 	const bool bWantsCustomDepth = bProxyWriteCustomDepth || (ProxyDofMode != EGaussianProxyDofMode::Off);
-	// Scene Depth early write: sensors only — never for DOF beauty.
-	const bool bEarlySceneDepth = bProxyWriteSceneDepth && ProxyDofMode == EGaussianProxyDofMode::Off;
-	const bool bWantsAnyDepthPass = bEarlySceneDepth || bWantsCustomDepth;
+	const bool bEarlySceneDepth = false; // hard-disable: was blacking the sky with large proxies
+	const bool bWantsAnyDepthPass = bWantsCustomDepth;
 	const bool bComponentActive = ProxyMesh != nullptr
 		&& (bShowProxyMesh || bWantsAnyDepthPass || bProxyEnableCollision
 			|| (ProxyDofMode != EGaussianProxyDofMode::Off) || bEnableRelighting);
@@ -436,11 +435,11 @@ void AGaussianSceneActor::ApplyProxyMeshSettings()
 	ProxyMeshComponent->SetRenderCustomDepth(bWantsCustomDepth);
 	// Stencil 0 is reserved "no proxy"; keep [1,255] to avoid clearing exclude mask.
 	ProxyMeshComponent->SetCustomDepthStencilValue(FMath::Clamp(ProxyCustomDepthStencilValue, 1, 255));
-	// Depth-only path: no lit main pass; no early SceneDepth when Proxy DOF is on.
-	// When relighting, keep lighting channels / base pass usable for SceneCapture.
+	// IMPORTANT: do NOT pass bEnableRelighting as "show color" — that forced main DepthPass
+	// on the full proxy hull and blacks out the skydome. Relight configures capture visibility itself.
 	GaussianProxyDofMitigation::ConfigureDepthOnlyComponent(
 		ProxyMeshComponent,
-		bShowProxyMesh || bEnableRelighting,
+		bShowProxyMesh,
 		bEarlySceneDepth);
 
 	if (bProxyEnableCollision)

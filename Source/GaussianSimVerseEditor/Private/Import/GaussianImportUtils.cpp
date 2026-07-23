@@ -7,29 +7,42 @@ namespace GaussianImport
 	namespace Private
 	{
 		/**
-		 * Authoring (Transform.PLY / SuperSplat) -> UE linear map:
-		 *   (x, y, z) -> (-x, -z, -y)
-		 * UE.Z = -Y maps authoring -Y-up to UE +Z-up.
-		 * Position and rotation MUST use this same basis or ellipsoids shear wrong.
+		 * SuperSplat / 3DGS authoring → UE linear map (meters, no unit scale here):
+		 *   (x, y, z) → (x, -z, -y)
+		 *
+		 * Matches SuperSplat viewer (equivalent to upright map (x,z,-y) then Scale.Y = -1).
+		 * det(M) = -1 (reflection). Do NOT build FQuat directly from M — rebuild rotation
+		 * from transformed principal axes instead.
 		 */
 		FVector3f AuthoringToUeVector(const FVector3f& V)
 		{
-			return FVector3f(-V.X, -V.Z, -V.Y);
+			return FVector3f(V.X, -V.Z, -V.Y);
 		}
 
-		const FQuat& GetAuthoringToUeQuat()
+		FVector AuthoringToUeVector(const FVector& V)
 		{
-			// Images of authoring basis axes under AuthoringToUeVector.
-			static const FQuat Quat = []()
-			{
-				const FVector XAxis(-1.0, 0.0, 0.0); // +X -> -X
-				const FVector YAxis(0.0, 0.0, -1.0); // +Y -> -Z
-				const FVector ZAxis(0.0, -1.0, 0.0); // +Z -> -Y
-				FMatrix Basis = FMatrix::Identity;
-				Basis.SetAxes(&XAxis, &YAxis, &ZAxis);
-				return FQuat(Basis).GetNormalized();
-			}();
-			return Quat;
+			return FVector(V.X, -V.Z, -V.Y);
+		}
+
+		/**
+		 * Map authoring rotation into UE under AuthoringToUeVector.
+		 * Axes a_i' = M * R * e_i; force a right-handed orthonormal frame for a valid quat.
+		 * (Gaussian ellipsoids are axis-flip symmetric, so fixing handedness is safe.)
+		 */
+		FQuat AuthoringRotationToUe(const FQuat& QSrc)
+		{
+			FVector T0 = AuthoringToUeVector(QSrc.RotateVector(FVector(1.0, 0.0, 0.0))).GetSafeNormal();
+			FVector T1 = AuthoringToUeVector(QSrc.RotateVector(FVector(0.0, 1.0, 0.0))).GetSafeNormal();
+			FVector T2 = AuthoringToUeVector(QSrc.RotateVector(FVector(0.0, 0.0, 1.0))).GetSafeNormal();
+
+			T1 = (T1 - T0 * FVector::DotProduct(T1, T0)).GetSafeNormal();
+			FVector T2Rh = FVector::CrossProduct(T0, T1).GetSafeNormal();
+			T2 = T2Rh;
+			T1 = FVector::CrossProduct(T2, T0).GetSafeNormal();
+
+			FMatrix Basis = FMatrix::Identity;
+			Basis.SetAxes(&T0, &T1, &T2);
+			return FQuat(Basis).GetNormalized();
 		}
 	}
 
@@ -58,23 +71,19 @@ namespace GaussianImport
 
 	FVector3f MetersToUEScale(const FVector3f& Scale)
 	{
-		// Local scale axes are carried by the converted quaternion; only convert units.
-		return Scale * MetersToCentimeters;
+		// Principal-axis lengths are invariant under orthogonal M (incl. reflections).
+		return Scale.GetAbs() * MetersToCentimeters;
 	}
 
 	FVector4f PlayCanvasToUERotation(float W, float X, float Y, float Z)
 	{
-		// Same left-multiply as splat-transform: Q_ue = Q_basis * Q_src.
 		const FQuat QSrc(X, Y, Z, W);
-		const FQuat QUe = (Private::GetAuthoringToUeQuat() * QSrc).GetNormalized();
+		const FQuat QUe = Private::AuthoringRotationToUe(QSrc.GetNormalized());
 		return FVector4f(QUe.X, QUe.Y, QUe.Z, QUe.W);
 	}
 
 	FVector3f PlyToUEPosition(const FVector3f& Position)
 	{
-		// PLY and SOG share Transform.PLY in SuperSplat. The editor's entity Z-180 is
-		// only for PlayCanvas +Y-up display — do not bake it into vertex data.
-		// Use the same PlayCanvas->UE map as SOG.
 		return PlayCanvasToUEPosition(Position);
 	}
 
@@ -90,7 +99,6 @@ namespace GaussianImport
 
 	FVector3f PlyMetersToUEScale(const FVector3f& Scale)
 	{
-		// Local scale axes are carried by the converted quaternion; only convert units.
 		return MetersToUEScale(Scale);
 	}
 

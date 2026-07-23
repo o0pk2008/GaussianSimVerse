@@ -453,17 +453,106 @@ FGaussianViewData FGaussianRenderer::BuildViewData(const FSceneView& InView)
 	return ViewData;
 }
 
-void FGaussianRenderer::RenderGaussiansForView(
+void FGaussianRenderer::ClearDeferredOverlays_RenderThread() const
+{
+	DeferredOverlays.Reset();
+}
+
+FRDGTextureRef FGaussianRenderer::RenderGaussiansForView(
 	FRDGBuilder& GraphBuilder,
 	const FSceneView& View,
 	FRDGTextureRef SceneColorTexture,
-	const FIntRect& SceneColorViewRect) const
+	const FIntRect& SceneColorViewRect,
+	FRDGTextureRef PreferredOutput,
+	bool bAfterTonemap,
+	EInjectMode InjectMode) const
 {
 	if (!GaussianSimVerse::RenderSettings::IsRenderingEnabled()
 		|| !GaussianSimVerse::RenderSettings::IsRasterEnabled()
 		|| !SceneColorTexture)
 	{
-		return;
+		return PreferredOutput ? PreferredOutput : SceneColorTexture;
+	}
+
+	// AfterTonemap: composite overlay produced earlier at BeforeDOF (same GraphBuilder frame).
+	if (InjectMode == EInjectMode::CompositePending)
+	{
+		const uint32 ViewKey = View.GetViewKey();
+		const FDeferredOverlay* Found = nullptr;
+		for (const FDeferredOverlay& Entry : DeferredOverlays)
+		{
+			if (Entry.ViewKey == ViewKey && Entry.Overlay)
+			{
+				Found = &Entry;
+				break;
+			}
+		}
+		if (!Found)
+		{
+			return PreferredOutput ? PreferredOutput : SceneColorTexture;
+		}
+
+		const FGaussianRelightFrameState Relight = GetRelightFrameState();
+		FRDGTextureRef RelightTex = GSystemTextures.GetBlackDummy(GraphBuilder);
+		bool bRelightEnabled = false;
+		if (Relight.bEnabled)
+		{
+			if (UTextureRenderTarget2D* RT = Relight.RenderTarget.Get())
+			{
+				if (FTextureRenderTargetResource* RTRes = RT->GetRenderTargetResource())
+				{
+					if (FRHITexture* RHI = RTRes->GetRenderTargetTexture())
+					{
+						RelightTex = GraphBuilder.RegisterExternalTexture(
+							CreateRenderTarget(RHI, TEXT("Gaussian.RelightMap")));
+						bRelightEnabled = true;
+					}
+				}
+			}
+		}
+
+		// Overlay is view-local and sized to the BeforeDOF inject rect. Color composite must use
+		// the *current* (AfterTonemap) SceneColor layout for SceneColorOffset — BeforeDOF and
+		// AfterTonemap buffers often differ (full buffer vs view slice).
+		const FIntPoint OverlayExtent = Found->Overlay->Desc.Extent;
+		const FIntRect CompositeRect(
+			SceneColorViewRect.Min.X,
+			SceneColorViewRect.Min.Y,
+			SceneColorViewRect.Min.X + OverlayExtent.X,
+			SceneColorViewRect.Min.Y + OverlayExtent.Y);
+		const FIntPoint SceneExtent = SceneColorTexture->Desc.Extent;
+		const FIntPoint ViewMin = SceneColorViewRect.Min;
+		const bool bOffsetFits =
+			ViewMin.X >= 0 && ViewMin.Y >= 0
+			&& (ViewMin.X + OverlayExtent.X) <= SceneExtent.X
+			&& (ViewMin.Y + OverlayExtent.Y) <= SceneExtent.Y;
+		const bool bSceneColorIsViewLocal =
+			!bOffsetFits
+			|| (SceneExtent.X == OverlayExtent.X && SceneExtent.Y == OverlayExtent.Y)
+			|| ViewMin == FIntPoint::ZeroValue;
+		const FIntPoint CompositeOffset = bSceneColorIsViewLocal ? FIntPoint::ZeroValue : ViewMin;
+
+		const float PreExposure = View.bIsViewInfo
+			? static_cast<const FViewInfo&>(View).PreExposure
+			: 1.0f;
+
+		// Overlay is linear soft multi-splat. bAfterTonemap selects composite encoding.
+		return FGaussianRenderGraph::AddCompositePass(
+			GraphBuilder,
+			SceneColorTexture,
+			Found->Overlay,
+			CompositeRect,
+			CompositeOffset,
+			PreferredOutput,
+			bRelightEnabled,
+			Relight.bDebug,
+			Relight.Blend,
+			Relight.Exposure,
+			Relight.Brightness,
+			Relight.Background,
+			RelightTex,
+			bAfterTonemap,
+			PreExposure);
 	}
 
 	const FGaussianFrameResources FrameResources = BuildFrameResources_RenderThread(View);
@@ -475,7 +564,7 @@ void FGaussianRenderer::RenderGaussiansForView(
 			bLoggedNoProxiesOnce = true;
 			UE_LOG(LogGaussianSimVerse, Warning, TEXT("GaussianSimVerse view %u: no active scene proxies on render thread"), View.GetViewKey());
 		}
-		return;
+		return PreferredOutput ? PreferredOutput : SceneColorTexture;
 	}
 
 	const FGaussianViewData ViewData = BuildViewData(View);
@@ -490,6 +579,8 @@ void FGaussianRenderer::RenderGaussiansForView(
 	FGaussianRDGTransientResources TransientResources = FGaussianRenderGraph::AllocateTransientResources(GraphBuilder);
 
 	FRDGTextureRef SoftDepthBits = nullptr;
+	FRDGTextureRef DeferredOverlay = nullptr;
+	FIntPoint DeferredSceneColorOffset = FIntPoint::ZeroValue;
 
 	// SceneDepth/CustomStencil use SceneTextures absolute pixels (ViewRect), not always PP SceneColor origin.
 	const FIntRect EngineViewRect = GetEffectiveViewRect(View);
@@ -505,9 +596,27 @@ void FGaussianRenderer::RenderGaussiansForView(
 	PassInputs.SceneColorTexture = SceneColorTexture;
 	PassInputs.SceneColorViewRect = SceneColorViewRect;
 	PassInputs.SceneDepthPixelOffset = SceneDepthPixelOffset;
-	PassInputs.bExportSoftDepthForDof = WantsCineCameraDepthOfField();
+	// Soft depth only useful before Diaphragm DOF.
+	PassInputs.bExportSoftDepthForDof =
+		WantsCineCameraDepthOfField()
+		&& (InjectMode == EInjectMode::Full || InjectMode == EInjectMode::SoftDepthAndOverlay);
 	PassInputs.OutSoftDepthDeviceZ = PassInputs.bExportSoftDepthForDof ? &SoftDepthBits : nullptr;
 	PassInputs.InvDeviceZToWorldZTransform = View.InvDeviceZToWorldZTransform;
+
+	FRDGTextureRef CompositedSceneColor = PreferredOutput ? PreferredOutput : SceneColorTexture;
+	PassInputs.OutCompositedSceneColor =
+		(InjectMode == EInjectMode::SoftDepthAndOverlay) ? nullptr : &CompositedSceneColor;
+	PassInputs.PreferredOutputTexture =
+		(InjectMode == EInjectMode::SoftDepthAndOverlay) ? nullptr : PreferredOutput;
+	PassInputs.bAfterTonemap = bAfterTonemap;
+	PassInputs.InjectMode = (InjectMode == EInjectMode::SoftDepthAndOverlay)
+		? FGaussianRenderGraph::FPassInputs::EInjectMode::SoftDepthAndOverlay
+		: FGaussianRenderGraph::FPassInputs::EInjectMode::Full;
+	if (InjectMode == EInjectMode::SoftDepthAndOverlay)
+	{
+		PassInputs.OutOverlayTexture = &DeferredOverlay;
+		PassInputs.OutSceneColorOffset = &DeferredSceneColorOffset;
+	}
 
 	// PlayCanvas-style relight: lit proxy RT from SceneCapture, sampled in CompositeCS.
 	{
@@ -615,6 +724,44 @@ void FGaussianRenderer::RenderGaussiansForView(
 		}
 	}
 
+	// Stash overlay for AfterTonemap composite (do not write SceneColor here — keeps eye adaptation correct).
+	if (InjectMode == EInjectMode::SoftDepthAndOverlay && DeferredOverlay)
+	{
+		const uint32 ViewKey = View.GetViewKey();
+		bool bReplaced = false;
+		for (FDeferredOverlay& Entry : DeferredOverlays)
+		{
+			if (Entry.ViewKey == ViewKey)
+			{
+				Entry.Overlay = DeferredOverlay;
+				Entry.SceneColorViewRect = SceneColorViewRect;
+				Entry.SceneColorOffset = DeferredSceneColorOffset;
+				bReplaced = true;
+				break;
+			}
+		}
+		if (!bReplaced)
+		{
+			FDeferredOverlay Entry;
+			Entry.ViewKey = ViewKey;
+			Entry.Overlay = DeferredOverlay;
+			Entry.SceneColorViewRect = SceneColorViewRect;
+			Entry.SceneColorOffset = DeferredSceneColorOffset;
+			DeferredOverlays.Add(Entry);
+		}
+
+		static bool bLoggedSplitInjectOnce = false;
+		if (!bLoggedSplitInjectOnce)
+		{
+			bLoggedSplitInjectOnce = true;
+			UE_LOG(LogGaussianSimVerse, Log,
+				TEXT("GaussianSimVerse: split inject — soft depth @ BeforeDOF, color composite deferred to AfterTonemap (PIE exposure fix)"));
+		}
+
+		// Return input SceneColor untouched so AE / tonemap only see meshes + sky.
+		return SceneColorTexture;
+	}
+
 	static bool bLoggedFirstRenderOnce = false;
 	if (!bLoggedFirstRenderOnce)
 	{
@@ -636,6 +783,8 @@ void FGaussianRenderer::RenderGaussiansForView(
 			SceneColorViewRect.Width(),
 			SceneColorViewRect.Height());
 	}
+
+	return CompositedSceneColor;
 }
 
 void FGaussianRenderer::MergeProxyCustomDepthIntoSceneDepth_RenderThread(

@@ -45,6 +45,7 @@ float3 GaussianClrScaleRGB;
 float GaussianSaturation;
 float GaussianTransparencyMultiplier;
 uint StreamingDebugRenderMode;
+uint bAfterTonemap;
 uint bDepthOcclusion;
 float DepthOcclusionBias;
 float4 InvDeviceZToWorldZTransform;
@@ -187,7 +188,8 @@ bool BlendTileSplat(
 			Splat.Color.rgb,
 			BindingParams.ClrOffset,
 			BindingParams.ClrScaleRGB,
-			BindingParams.Saturation);
+			BindingParams.Saturation,
+			bAfterTonemap);
 		if (StreamingDebugRenderMode == 1u)
 		{
 			const uint LodLevel = (uint)max(0.0, round(BindingParams.LodLevel));
@@ -266,8 +268,7 @@ void MainCS(uint3 GroupId : SV_GroupID, uint3 GroupThreadId : SV_GroupThreadID)
 	const float Coverage = saturate(1.0 - Transmittance);
 	if (Coverage > GaussianAlphaCutoff)
 	{
-		// Premultiplied RGB must not exceed coverage (prevents washed-out HDR blowout).
-		AccumRgb = min(AccumRgb, Coverage.xxx);
+		// Keep full linear HDR premul (no clamp to Coverage) so soft tails stay smooth through tonemap.
 		const float4 Existing = RWOverlay[Pixel];
 		const float3 OutRgb = AccumRgb + Existing.rgb * (1.0 - Coverage);
 		const float OutAlpha = Coverage + Existing.a * (1.0 - Coverage);

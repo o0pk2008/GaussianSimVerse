@@ -19,16 +19,13 @@ namespace GaussianImport
 	GAUSSIANSIMVERSEEDITOR_API float UnlogPosition(float N);
 	GAUSSIANSIMVERSEEDITOR_API FVector3f LerpVec3(const FVector3f& Min, const FVector3f& Max, const FVector3f& T);
 
-	/** SuperSplat authoring frame (PLY/SOG, -Y up) position to UE. */
+	/** SuperSplat / 3DGS authoring → UE cm: (x,y,z)→(x,-z,-y)*100 (matches SuperSplat; Scale.Y=-1 baked in). */
 	GAUSSIANSIMVERSEEDITOR_API FVector3f PlayCanvasToUEPosition(const FVector3f& Position);
 
 	/** Quaternion (w,x,y,z) in authoring frame to UE (x,y,z,w). */
 	GAUSSIANSIMVERSEEDITOR_API FVector4f PlayCanvasToUERotation(float W, float X, float Y, float Z);
 
-	/**
-	 * PLY (standard or SuperSplat compressed) to UE — identical to SOG/PlayCanvasToUE.
-	 * SuperSplat's entity Z-180 is display-only and must not be baked into vertices.
-	 */
+	/** PLY → UE; same basis as SOG / PlayCanvasToUEPosition. */
 	GAUSSIANSIMVERSEEDITOR_API FVector3f PlyToUEPosition(const FVector3f& Position);
 
 	/** PLY direction to UE without unit conversion (same basis as PlyToUEPosition). */

@@ -48,11 +48,36 @@ public:
 	bool WantsPluginDepthOfField() const;
 
 	FGaussianFrameResources BuildFrameResources_RenderThread(const FSceneView& View) const;
-	void RenderGaussiansForView(
+
+	/**
+	 * Inject mode for split CineCamera DOF + exposure-safe color composite.
+	 * SoftDepthAndOverlay runs at BeforeDOF (no SceneColor write).
+	 * CompositePending runs at AfterTonemap using the stashed overlay.
+	 */
+	enum class EInjectMode : uint8
+	{
+		Full = 0,
+		SoftDepthAndOverlay,
+		CompositePending,
+	};
+
+	/**
+	 * Raster + composite gaussians for a post-process inject.
+	 * @param PreferredOutput If valid, composite into this RT (e.g. OverrideOutput after tonemap).
+	 * @param bAfterTonemap When true, splat colors stay display-referred (no sRGB→linear).
+	 * @return Scene color texture for the rest of the PP chain.
+	 */
+	FRDGTextureRef RenderGaussiansForView(
 		FRDGBuilder& GraphBuilder,
 		const FSceneView& View,
 		FRDGTextureRef SceneColorTexture,
-		const FIntRect& SceneColorViewRect) const;
+		const FIntRect& SceneColorViewRect,
+		FRDGTextureRef PreferredOutput = nullptr,
+		bool bAfterTonemap = false,
+		EInjectMode InjectMode = EInjectMode::Full) const;
+
+	/** Clear RDG-only deferred overlays (call once per frame before PP). */
+	void ClearDeferredOverlays_RenderThread() const;
 
 	/**
 	 * Plugin CoC DOF after gaussians are composited. Uses proxy CustomDepth (not early SceneDepth).
@@ -141,4 +166,14 @@ private:
 	TSharedPtr<FGaussianViewExtension, ESPMode::ThreadSafe> ViewExtension;
 
 	FGaussianRelightFrameState RelightFrameState;
+
+	/** Per-view overlay stashed at BeforeDOF for AfterTonemap composite (same GraphBuilder frame). */
+	struct FDeferredOverlay
+	{
+		uint32 ViewKey = 0;
+		FRDGTextureRef Overlay = nullptr;
+		FIntRect SceneColorViewRect;
+		FIntPoint SceneColorOffset = FIntPoint::ZeroValue;
+	};
+	mutable TArray<FDeferredOverlay> DeferredOverlays;
 };

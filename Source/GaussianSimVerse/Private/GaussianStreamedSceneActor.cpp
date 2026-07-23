@@ -602,18 +602,18 @@ void AGaussianStreamedSceneActor::ApplyProxyMeshSettings()
 		return;
 	}
 
-	// Plugin DOF: Custom Depth only. Write Scene Depth OFF (black skydome if early SceneDepth).
+	// NEVER early-write SceneDepth for beauty (blocks skydome → black sky).
 	if (ProxyDofMode != EGaussianProxyDofMode::Off)
 	{
 		bProxyWriteCustomDepth = true;
-		bProxyWriteSceneDepth = false;
 	}
+	bProxyWriteSceneDepth = false;
 
 	ProxyMeshComponent->SetStaticMesh(ProxyMesh);
 
 	const bool bWantsCustomDepth = bProxyWriteCustomDepth || (ProxyDofMode != EGaussianProxyDofMode::Off);
-	const bool bEarlySceneDepth = bProxyWriteSceneDepth && ProxyDofMode == EGaussianProxyDofMode::Off;
-	const bool bWantsAnyDepthPass = bEarlySceneDepth || bWantsCustomDepth;
+	const bool bEarlySceneDepth = false; // hard-disable: large proxy hull blacks out sky
+	const bool bWantsAnyDepthPass = bWantsCustomDepth;
 	const bool bComponentActive = ProxyMesh != nullptr
 		&& (bShowProxyMesh || bWantsAnyDepthPass || bProxyEnableCollision
 			|| (ProxyDofMode != EGaussianProxyDofMode::Off) || bEnableRelighting);
@@ -622,9 +622,10 @@ void AGaussianStreamedSceneActor::ApplyProxyMeshSettings()
 	ProxyMeshComponent->SetHiddenInGame(!bComponentActive);
 	ProxyMeshComponent->SetRenderCustomDepth(bWantsCustomDepth);
 	ProxyMeshComponent->SetCustomDepthStencilValue(FMath::Clamp(ProxyCustomDepthStencilValue, 1, 255));
+	// Do NOT pass bEnableRelighting as show-color (that forced main DepthPass → black sky).
 	GaussianProxyDofMitigation::ConfigureDepthOnlyComponent(
 		ProxyMeshComponent,
-		bShowProxyMesh || bEnableRelighting,
+		bShowProxyMesh,
 		bEarlySceneDepth);
 
 	if (bProxyEnableCollision)

@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "SceneViewExtension.h"
+#include "Rendering/GaussianRenderer.h"
 
 class FGaussianRenderer;
 struct FPostProcessMaterialInputs;
@@ -30,7 +31,9 @@ private:
 	FScreenPassTexture InjectGaussiansPostProcess_RenderThread(
 		FRDGBuilder& GraphBuilder,
 		const FSceneView& View,
-		const FPostProcessMaterialInputs& Inputs);
+		const FPostProcessMaterialInputs& Inputs,
+		FGaussianRenderer::EInjectMode InjectMode,
+		bool bAfterTonemap);
 
 	FGaussianRenderer& Renderer;
 };

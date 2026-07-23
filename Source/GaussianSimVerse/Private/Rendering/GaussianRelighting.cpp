@@ -107,8 +107,10 @@ namespace GaussianRelighting
 			InOutSkyLight->SetMobility(EComponentMobility::Movable);
 			InOutSkyLight->bRealTimeCapture = false;
 			InOutSkyLight->SourceType = ESkyLightSourceType::SLS_SpecifiedCubemap;
+			// Never let a dormant black/empty skylight darken the level sky.
 			InOutSkyLight->SetVisibility(false);
 			InOutSkyLight->SetIntensity(0.0f);
+			InOutSkyLight->bAffectsWorld = false;
 		}
 
 		if (!InOutRT)
@@ -190,8 +192,11 @@ namespace GaussianRelighting
 		{
 			ShadowOnlyProxy->SetStaticMesh(nullptr);
 			ShadowOnlyProxy->SetVisibility(false);
+			ShadowOnlyProxy->SetHiddenInGame(true);
 			ShadowOnlyProxy->SetCastShadow(false);
 			ShadowOnlyProxy->bCastHiddenShadow = false;
+			ShadowOnlyProxy->bRenderInDepthPass = false;
+			ShadowOnlyProxy->SetRenderInMainPass(false);
 			return;
 		}
 
@@ -203,17 +208,23 @@ namespace GaussianRelighting
 		ShadowOnlyProxy->SetHiddenInGame(false);
 		ShadowOnlyProxy->SetHiddenInSceneCapture(true); // lighting RT uses the other proxy component
 		ShadowOnlyProxy->SetRenderInMainPass(false);    // no gray mesh in beauty
+		// Critical: never write main SceneDepth (that blacks the skydome).
 		ShadowOnlyProxy->bRenderInDepthPass = false;
+		ShadowOnlyProxy->bUseAsOccluder = false;
 		ShadowOnlyProxy->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		ShadowOnlyProxy->SetCastShadow(true);
 		ShadowOnlyProxy->bCastDynamicShadow = true;
 		ShadowOnlyProxy->bCastStaticShadow = true;
-		ShadowOnlyProxy->bCastContactShadow = true;
-		ShadowOnlyProxy->bCastFarShadow = true;
+		ShadowOnlyProxy->bCastContactShadow = false;
+		ShadowOnlyProxy->bCastFarShadow = false; // avoid level-wide black from huge hulls
+		ShadowOnlyProxy->bCastInsetShadow = false;
+		ShadowOnlyProxy->bCastVolumetricTranslucentShadow = false;
 		// Cast into the main view even though not drawn in the main color pass.
 		ShadowOnlyProxy->bCastHiddenShadow = true;
 		ShadowOnlyProxy->SetRenderCustomDepth(false);
 		ShadowOnlyProxy->SetReceivesDecals(false);
+		ShadowOnlyProxy->bAffectDynamicIndirectLighting = false;
+		ShadowOnlyProxy->bAffectDistanceFieldLighting = false;
 		ShadowOnlyProxy->SetLightingChannels(true, false, false);
 		ShadowOnlyProxy->MarkRenderStateDirty();
 	}
@@ -341,9 +352,13 @@ namespace GaussianRelighting
 			SkyLight->SetVisibility(false);
 			SkyLight->SetIntensity(0.0f);
 			SkyLight->SetCubemap(nullptr);
+			// Empty skylight must not replace the level sky with black ambient.
+			SkyLight->bAffectsWorld = false;
 			return;
 		}
 
+		// Optional: only affect the world if the user assigned a real cubemap.
+		SkyLight->bAffectsWorld = true;
 		SkyLight->SetVisibility(true);
 		SkyLight->SourceType = ESkyLightSourceType::SLS_SpecifiedCubemap;
 		SkyLight->SetCubemap(Settings.Skydome);
@@ -405,32 +420,32 @@ namespace GaussianRelighting
 
 		if (bRelightEnabled)
 		{
-			// Drawn in the full-scene lighting capture (receive sun + box shadows).
-			// Main-view color only if Show Proxy; casting onto ground is a separate shadow-only mesh.
+			// Capture-only lit gray proxy (receives sun/box shadows in SceneCapture).
+			// Must NOT write main SceneDepth / main color when Show is off — that blacks the sky.
 			Proxy->SetVisibility(true);
 			Proxy->SetHiddenInGame(false);
 			Proxy->SetHiddenInSceneCapture(false);
-			Proxy->SetVisibleInSceneCaptureOnly(false);
-			// Always in base pass so SceneCapture (full scene) includes this gray lit proxy.
-			Proxy->SetRenderInMainPass(true);
-			Proxy->bRenderInDepthPass = true;
-			// Avoid double shadows with the dedicated shadow-only component.
 			Proxy->SetCastShadow(false);
 			Proxy->bCastDynamicShadow = false;
 			Proxy->bCastStaticShadow = false;
 			Proxy->bCastHiddenShadow = false;
 			Proxy->SetReceivesDecals(false);
 			Proxy->bAffectDynamicIndirectLighting = true;
+			Proxy->bAffectDistanceFieldLighting = false;
+			Proxy->bUseAsOccluder = false;
 			Proxy->SetLightingChannels(true, false, false);
-			// If not showing proxy in beauty, hide main-view color via "only owner see" is wrong;
-			// use VisibleInSceneCaptureOnly=false + hide with bRenderInMainPass only when showing.
-			// When !Show: still need main pass for capture → use Capture-only visibility trick:
-			//  VisibleInSceneCaptureOnly would kill main shadows (other component handles that).
 			if (!bShowProxyMesh)
 			{
-				// Keep RenderInMainPass true for capture; hide from player by owner-no-see on non-capture.
-				// SceneCapture ignores OwnerNoSee by default in many versions — use:
+				// Only drawn into SceneCapture — never main view depth/color.
 				Proxy->SetVisibleInSceneCaptureOnly(true);
+				Proxy->SetRenderInMainPass(true); // needed for capture base pass
+				Proxy->bRenderInDepthPass = false;
+			}
+			else
+			{
+				Proxy->SetVisibleInSceneCaptureOnly(false);
+				Proxy->SetRenderInMainPass(true);
+				Proxy->bRenderInDepthPass = true;
 			}
 			if (RelightMaterial)
 			{
@@ -447,6 +462,7 @@ namespace GaussianRelighting
 			Proxy->SetVisibleInSceneCaptureOnly(false);
 			Proxy->SetCastShadow(false);
 			Proxy->bCastHiddenShadow = false;
+			Proxy->bUseAsOccluder = false;
 		}
 	}
 

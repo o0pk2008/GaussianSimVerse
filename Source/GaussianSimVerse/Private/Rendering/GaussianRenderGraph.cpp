@@ -7,6 +7,7 @@
 #include "Rendering/GaussianGPUResources.h"
 #include "GaussianSimVerse.h"
 #include "SceneView.h"
+#include "SceneRendering.h"
 #include "RenderGraphUtils.h"
 #include "ShaderParameterStruct.h"
 #include "GlobalShader.h"
@@ -54,6 +55,7 @@ namespace GaussianRenderGraphPrivate
 		uint32 MaxRasterRadius,
 		bool bDebugOverlay,
 		uint32 StreamingDebugRenderMode,
+		uint32 bAfterTonemap,
 		uint32 RenderShDegree,
 		uint32 ImportedShDegree,
 		uint32 bHasShCoefficients,
@@ -87,6 +89,7 @@ namespace GaussianRenderGraphPrivate
 		OutParameters.MaxRasterRadius = MaxRasterRadius;
 		OutParameters.bDebugOverlay = bDebugOverlay ? 1u : 0u;
 		OutParameters.StreamingDebugRenderMode = StreamingDebugRenderMode;
+		OutParameters.bAfterTonemap = bAfterTonemap;
 		OutParameters.RenderShDegree = RenderShDegree;
 		OutParameters.ImportedShDegree = ImportedShDegree;
 		OutParameters.bHasShCoefficients = bHasShCoefficients;
@@ -682,6 +685,101 @@ FGaussianRDGTransientResources FGaussianRenderGraph::AllocateTransientResources(
 	return Resources;
 }
 
+FRDGTextureRef FGaussianRenderGraph::AddCompositePass(
+	FRDGBuilder& GraphBuilder,
+	FRDGTextureRef SceneColorTexture,
+	FRDGTextureRef OverlayTexture,
+	const FIntRect& SceneColorViewRect,
+	FIntPoint SceneColorOffset,
+	FRDGTextureRef PreferredOutputTexture,
+	bool bRelightEnabled,
+	bool bRelightDebug,
+	float RelightBlend,
+	float RelightExposure,
+	float RelightBrightness,
+	float RelightBackground,
+	FRDGTextureRef RelightTexture,
+	bool bAfterTonemap,
+	float PreExposure)
+{
+	if (!SceneColorTexture || !OverlayTexture)
+	{
+		return PreferredOutputTexture ? PreferredOutputTexture : SceneColorTexture;
+	}
+
+	const FGlobalShaderMap* GlobalShaderMap = GetGlobalShaderMap(GMaxRHIFeatureLevel);
+	const TShaderMapRef<FGaussianCompositeCS> CompositeShader(GlobalShaderMap);
+	if (!CompositeShader.IsValid())
+	{
+		UE_LOG(LogGaussianSimVerse, Warning, TEXT("GaussianSimVerse composite shader is not compiled; splats were rasterized but not blended."));
+		return PreferredOutputTexture ? PreferredOutputTexture : SceneColorTexture;
+	}
+
+	// Compute composite needs a UAV. After-tonemap OverrideOutput is often ViewFamilyTexture
+	// without TexCreate_UAV — using it crashes RDG validation. Only reuse PreferredOutput when
+	// it already has UAV; otherwise allocate a new RT and return that to the PP chain.
+	const bool bPreferredIsWritableUav =
+		PreferredOutputTexture
+		&& PreferredOutputTexture != SceneColorTexture
+		&& EnumHasAnyFlags(PreferredOutputTexture->Desc.Flags, ETextureCreateFlags::UAV);
+
+	FRDGTextureRef OutputTexture = bPreferredIsWritableUav ? PreferredOutputTexture : nullptr;
+	if (!OutputTexture)
+	{
+		FRDGTextureDesc OutputDesc = SceneColorTexture->Desc;
+		OutputDesc.Flags |= ETextureCreateFlags::ShaderResource | ETextureCreateFlags::UAV
+			| ETextureCreateFlags::RenderTargetable;
+		OutputTexture = GraphBuilder.CreateTexture(OutputDesc, TEXT("Gaussian.SceneColorOut"));
+	}
+
+	// Seed full buffer so non-view / non-splat pixels stay correct.
+	if (OutputTexture != SceneColorTexture)
+	{
+		AddCopyTexturePass(GraphBuilder, SceneColorTexture, OutputTexture);
+	}
+
+	const uint32 ViewWidth = FMath::Max(1, SceneColorViewRect.Width());
+	const uint32 ViewHeight = FMath::Max(1, SceneColorViewRect.Height());
+	const FVector4f ViewRect(
+		0.0f,
+		0.0f,
+		static_cast<float>(ViewWidth),
+		static_cast<float>(ViewHeight));
+
+	FGaussianCompositeCS::FParameters* CompositeParams = GraphBuilder.AllocParameters<FGaussianCompositeCS::FParameters>();
+	CompositeParams->ViewRect = ViewRect;
+	CompositeParams->SceneColorOffset = SceneColorOffset;
+	CompositeParams->bRelightEnabled = bRelightEnabled ? 1u : 0u;
+	CompositeParams->bRelightDebug = (bRelightEnabled && bRelightDebug) ? 1u : 0u;
+	CompositeParams->bAfterTonemap = bAfterTonemap ? 1u : 0u;
+	CompositeParams->PreExposure = FMath::Max(PreExposure, 1e-4f);
+	CompositeParams->RelightBlend = RelightBlend;
+	CompositeParams->RelightExposure = RelightExposure;
+	CompositeParams->RelightBrightness = RelightBrightness;
+	CompositeParams->RelightBackground = RelightBackground;
+	CompositeParams->SceneColorTexture = SceneColorTexture;
+	CompositeParams->OverlayTexture = OverlayTexture;
+	CompositeParams->RelightTexture = RelightTexture
+		? RelightTexture
+		: GSystemTextures.GetBlackDummy(GraphBuilder);
+	CompositeParams->RelightSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+	CompositeParams->RWSceneColor = GraphBuilder.CreateUAV(OutputTexture);
+
+	const uint32 GroupsX = FMath::DivideAndRoundUp(ViewWidth, 8u);
+	const uint32 GroupsY = FMath::DivideAndRoundUp(ViewHeight, 8u);
+	FComputeShaderUtils::AddPass(
+		GraphBuilder,
+		bAfterTonemap
+			? RDG_EVENT_NAME("GaussianSimVerse::CompositeAfterTonemap")
+			: RDG_EVENT_NAME("GaussianSimVerse::Composite"),
+		ERDGPassFlags::Compute,
+		CompositeShader,
+		CompositeParams,
+		FIntVector(GroupsX, GroupsY, 1));
+
+	return OutputTexture;
+}
+
 void FGaussianRenderGraph::AddPasses(
 	FRDGBuilder& GraphBuilder,
 	const FPassInputs& Inputs,
@@ -689,6 +787,42 @@ void FGaussianRenderGraph::AddPasses(
 {
 	if (!GaussianSimVerse::RenderSettings::IsRenderingEnabled())
 	{
+		return;
+	}
+
+	// Deferred color composite after tonemap: overlay was built earlier this frame (BeforeDOF).
+	if (Inputs.InjectMode == FPassInputs::EInjectMode::CompositeOnly)
+	{
+		if (!Inputs.SceneColorTexture || !Inputs.ExternalOverlayTexture)
+		{
+			return;
+		}
+
+		const float PreExposure = (Inputs.View && Inputs.View->bIsViewInfo)
+			? static_cast<const FViewInfo*>(Inputs.View)->PreExposure
+			: 1.0f;
+
+		FRDGTextureRef OutputTexture = AddCompositePass(
+			GraphBuilder,
+			Inputs.SceneColorTexture,
+			Inputs.ExternalOverlayTexture,
+			Inputs.SceneColorViewRect,
+			Inputs.ExternalSceneColorOffset,
+			Inputs.PreferredOutputTexture,
+			Inputs.bRelightEnabled,
+			Inputs.bRelightDebug,
+			Inputs.RelightBlend,
+			Inputs.RelightExposure,
+			Inputs.RelightBrightness,
+			Inputs.RelightBackground,
+			Inputs.RelightTexture,
+			Inputs.bAfterTonemap,
+			PreExposure);
+
+		if (Inputs.OutCompositedSceneColor)
+		{
+			*Inputs.OutCompositedSceneColor = OutputTexture;
+		}
 		return;
 	}
 
@@ -1205,6 +1339,9 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 	FRDGTextureUAVRef SoftDepthUAV = GraphBuilder.CreateUAV(SoftDepthTexture);
 	AddClearUAVPass(GraphBuilder, SoftDepthUAV, 0u);
 	const uint32 WriteSoftDepthFlag = bExportSoftDepth ? 1u : 0u;
+	// Always accumulate splat colors in LINEAR (sRGB→linear). Multi-splat alpha is wrong in
+	// display space. After-tonemap composite converts once in CompositeCS (Inputs.bAfterTonemap).
+	const uint32 AfterTonemapFlag = 0u;
 
 	const TArray<float> DummyShCoefficientsCPU = { 0.0f };
 	FRDGBufferRef DummyShCoefficientsBuffer = CreateStructuredUploadBuffer(
@@ -1259,11 +1396,30 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 	// ViewportRect == ViewRect here: clip-to-screen stays in overlay space; composite adds SceneColorOffset.
 	const FVector4f ViewportRect = ViewRect;
 
-	// Overlay/composite: origin of the PP SceneColor slice (may be 0,0 after late resolves).
-	const FIntPoint SceneColorOffset = Inputs.SceneColorViewRect.Min;
-	// SceneDepth / CustomStencil: SceneTextures absolute pixels (ViewRect.Min). Critical for
-	// depth occlusion of regular actors when inject is AfterDOF/MB (DOF Mode Off).
+	// Overlay is always 0-based and sized to SceneColorViewRect.
+	// SceneDepth / CustomStencil live in full SceneTextures space (ViewRect.Min).
 	const FIntPoint SceneDepthOffset = Inputs.SceneDepthPixelOffset;
+
+	// PP SceneColor may be:
+	//  (A) full buffer with content at ViewRect.Min, or
+	//  (B) a view-sized slice with content at (0,0) (common in editor Game View / G key).
+	// Using absolute Min on a slice reads OOB → black sky/boxes after copy-back.
+	const FIntPoint SceneColorExtent = Inputs.SceneColorTexture
+		? Inputs.SceneColorTexture->Desc.Extent
+		: OverlayExtent;
+	const FIntPoint ViewMin = Inputs.SceneColorViewRect.Min;
+	const bool bOffsetFits =
+		ViewMin.X >= 0 && ViewMin.Y >= 0
+		&& (ViewMin.X + OverlayExtent.X) <= SceneColorExtent.X
+		&& (ViewMin.Y + OverlayExtent.Y) <= SceneColorExtent.Y;
+	const bool bSceneColorIsViewLocal =
+		!bOffsetFits
+		|| (SceneColorExtent.X == OverlayExtent.X && SceneColorExtent.Y == OverlayExtent.Y)
+		|| ViewMin == FIntPoint::ZeroValue;
+	// For composite color read/write: 0-based on view-local textures; absolute Min on full buffers.
+	const FIntPoint SceneColorOffset = bSceneColorIsViewLocal ? FIntPoint::ZeroValue : ViewMin;
+	// Where the view lives in the full SceneColor texture (for region copy in/out).
+	const FIntPoint SceneColorCopyOrigin = bSceneColorIsViewLocal ? FIntPoint::ZeroValue : ViewMin;
 	const bool bDepthOcclusion = Inputs.bDepthOcclusion && Inputs.SceneDepthTexture != nullptr;
 	const uint32 DepthOcclusionFlag = bDepthOcclusion ? 1u : 0u;
 	const float DepthOcclusionBias = Inputs.DepthOcclusionBiasCm;
@@ -1509,6 +1665,7 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 			BlendParameters->MaxRasterRadius = MaxRasterRadius;
 			BlendParameters->bDebugOverlay = bDebugOverlay ? 1u : 0u;
 			BlendParameters->StreamingDebugRenderMode = StreamingDebugRenderMode;
+			BlendParameters->bAfterTonemap = AfterTonemapFlag;
 			BlendParameters->RenderShDegree = Binding.RenderShDegree;
 			BlendParameters->ImportedShDegree = Binding.ImportedShDegree;
 			BlendParameters->bHasShCoefficients = Binding.bHasShCoefficients;
@@ -1580,6 +1737,7 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 					MaxRasterRadius,
 					bDebugOverlay,
 					StreamingDebugRenderMode,
+					AfterTonemapFlag,
 					Binding.RenderShDegree,
 					Binding.ImportedShDegree,
 					Binding.bHasShCoefficients,
@@ -1867,6 +2025,7 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 			BlendParameters->MaxRasterRadius = MaxRasterRadius;
 			BlendParameters->bDebugOverlay = bDebugOverlay ? 1u : 0u;
 			BlendParameters->StreamingDebugRenderMode = StreamingDebugRenderMode;
+			BlendParameters->bAfterTonemap = AfterTonemapFlag;
 			BlendParameters->RenderShDegree = Binding.RenderShDegree;
 			BlendParameters->ImportedShDegree = Binding.ImportedShDegree;
 			BlendParameters->bHasShCoefficients = Binding.bHasShCoefficients;
@@ -1938,6 +2097,7 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 					MaxRasterRadius,
 					bDebugOverlay,
 					StreamingDebugRenderMode,
+					AfterTonemapFlag,
 					Binding.RenderShDegree,
 					Binding.ImportedShDegree,
 					Binding.bHasShCoefficients,
@@ -1999,6 +2159,7 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 				PassParameters->MaxRasterRadius = MaxRasterRadius;
 				PassParameters->bDebugOverlay = bDebugOverlay ? 1u : 0u;
 				PassParameters->StreamingDebugRenderMode = StreamingDebugRenderMode;
+				PassParameters->bAfterTonemap = AfterTonemapFlag;
 				PassParameters->RenderShDegree = Binding.RenderShDegree;
 				PassParameters->ImportedShDegree = Binding.ImportedShDegree;
 				PassParameters->bHasShCoefficients = Binding.bHasShCoefficients;
@@ -2043,48 +2204,45 @@ void FGaussianRenderGraph::AddGPURasterPasses(
 
 	if (TotalRasterSplats > 0)
 	{
-		const TShaderMapRef<FGaussianCompositeCS> CompositeShader(GlobalShaderMap);
-		if (CompositeShader.IsValid())
+		// Soft-depth-only path (CineCamera BeforeDOF): keep SceneColor untouched for eye adaptation.
+		if (Inputs.InjectMode == FPassInputs::EInjectMode::SoftDepthAndOverlay)
 		{
-			// Scene color resolve textures are not created with UAV; composite to a scratch target then copy back.
-			FRDGTextureDesc MergedDesc = SceneColorTexture->Desc;
-			MergedDesc.Flags |= ETextureCreateFlags::ShaderResource | ETextureCreateFlags::UAV;
-			FRDGTextureRef MergedTexture = GraphBuilder.CreateTexture(MergedDesc, TEXT("Gaussian.MergedSceneColor"));
-			FRDGTextureUAVRef MergedUAV = GraphBuilder.CreateUAV(MergedTexture);
-			AddCopyTexturePass(GraphBuilder, SceneColorTexture, MergedTexture);
-
-			FGaussianCompositeCS::FParameters* CompositeParams = GraphBuilder.AllocParameters<FGaussianCompositeCS::FParameters>();
-			CompositeParams->ViewRect = ViewRect;
-			CompositeParams->SceneColorOffset = SceneColorOffset;
-			CompositeParams->bRelightEnabled = Inputs.bRelightEnabled ? 1u : 0u;
-			CompositeParams->bRelightDebug = (Inputs.bRelightEnabled && Inputs.bRelightDebug) ? 1u : 0u;
-			CompositeParams->RelightBlend = Inputs.RelightBlend;
-			CompositeParams->RelightExposure = Inputs.RelightExposure;
-			CompositeParams->RelightBrightness = Inputs.RelightBrightness;
-			CompositeParams->RelightBackground = Inputs.RelightBackground;
-			CompositeParams->SceneColorTexture = SceneColorTexture;
-			CompositeParams->OverlayTexture = OverlayTexture;
-			CompositeParams->RelightTexture = Inputs.RelightTexture
-				? Inputs.RelightTexture
-				: GSystemTextures.GetBlackDummy(GraphBuilder);
-			CompositeParams->RelightSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
-			CompositeParams->RWSceneColor = MergedUAV;
-
-			const uint32 GroupsX = FMath::DivideAndRoundUp(ViewWidth, 8u);
-			const uint32 GroupsY = FMath::DivideAndRoundUp(ViewHeight, 8u);
-			FComputeShaderUtils::AddPass(
-				GraphBuilder,
-				RDG_EVENT_NAME("GaussianSimVerse::Composite"),
-				ERDGPassFlags::Compute,
-				CompositeShader,
-				CompositeParams,
-				FIntVector(GroupsX, GroupsY, 1));
-
-			AddCopyTexturePass(GraphBuilder, MergedTexture, SceneColorTexture);
+			if (Inputs.OutOverlayTexture)
+			{
+				*Inputs.OutOverlayTexture = OverlayTexture;
+			}
+			if (Inputs.OutSceneColorOffset)
+			{
+				*Inputs.OutSceneColorOffset = SceneColorCopyOrigin;
+			}
 		}
 		else
 		{
-			UE_LOG(LogGaussianSimVerse, Warning, TEXT("GaussianSimVerse composite shader is not compiled; splats were rasterized but not blended."));
+			const float PreExposure = (Inputs.View && Inputs.View->bIsViewInfo)
+				? static_cast<const FViewInfo*>(Inputs.View)->PreExposure
+				: 1.0f;
+
+			FRDGTextureRef OutputTexture = AddCompositePass(
+				GraphBuilder,
+				SceneColorTexture,
+				OverlayTexture,
+				Inputs.SceneColorViewRect,
+				SceneColorCopyOrigin,
+				Inputs.PreferredOutputTexture,
+				Inputs.bRelightEnabled,
+				Inputs.bRelightDebug,
+				Inputs.RelightBlend,
+				Inputs.RelightExposure,
+				Inputs.RelightBrightness,
+				Inputs.RelightBackground,
+				Inputs.RelightTexture,
+				Inputs.bAfterTonemap,
+				PreExposure);
+
+			if (Inputs.OutCompositedSceneColor)
+			{
+				*Inputs.OutCompositedSceneColor = OutputTexture;
+			}
 		}
 
 		// Soft depth is written during compute raster (Tile/RasterCS), independent of composite success.

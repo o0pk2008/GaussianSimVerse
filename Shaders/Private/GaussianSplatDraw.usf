@@ -33,6 +33,7 @@ float3 GaussianClrScaleRGB;
 float GaussianSaturation;
 float GaussianTransparencyMultiplier;
 uint StreamingDebugRenderMode;
+uint bAfterTonemap;
 uint bUseGlobalChunkLookup;
 uint bDepthOcclusion;
 float DepthOcclusionBias;
@@ -218,7 +219,8 @@ void MainVS(
 		Splat.Color.rgb,
 		LocalClrOffset,
 		LocalClrScaleRGB,
-		LocalSaturation);
+		LocalSaturation,
+		bAfterTonemap);
 	if (StreamingDebugRenderMode == 1u)
 	{
 		Output.Color = ApplyGaussianLodDebugTint(Output.Color, LocalLodLevel);

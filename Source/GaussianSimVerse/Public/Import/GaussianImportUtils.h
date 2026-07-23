@@ -19,7 +19,7 @@ namespace GaussianImport
 	GAUSSIANSIMVERSE_API float UnlogPosition(float N);
 	GAUSSIANSIMVERSE_API FVector3f LerpVec3(const FVector3f& Min, const FVector3f& Max, const FVector3f& T);
 
-	/** SuperSplat authoring frame (PLY/SOG, -Y up) position to UE. */
+	/** SuperSplat / 3DGS authoring → UE cm: (x,y,z)→(x,-z,-y)*100 (matches SuperSplat; Scale.Y=-1 baked in). */
 	GAUSSIANSIMVERSE_API FVector3f PlayCanvasToUEPosition(const FVector3f& Position);
 
 	/** Quaternion (w,x,y,z) in authoring frame to UE (x,y,z,w). */

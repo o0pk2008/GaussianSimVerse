@@ -5,6 +5,7 @@
 #include "Rendering/GaussianRenderSettings.h"
 #include "GaussianTypes.h"
 #include "PostProcess/PostProcessMaterialInputs.h"
+#include "RenderGraphUtils.h"
 #include "SceneUtils.h"
 #include "SceneView.h"
 #include "ScreenPass.h"
@@ -42,6 +43,8 @@ void FGaussianViewExtension::SetupView(FSceneViewFamily& InViewFamily, FSceneVie
 void FGaussianViewExtension::PreRenderViewFamily_RenderThread(FRDGBuilder& GraphBuilder, FSceneViewFamily& InViewFamily)
 {
 	Renderer.SyncSceneProxies_RenderThread();
+	// RDG textures from the previous frame are invalid — drop deferred overlays.
+	Renderer.ClearDeferredOverlays_RenderThread();
 }
 
 void FGaussianViewExtension::PreRenderView_RenderThread(FRDGBuilder& GraphBuilder, FSceneView& InView)
@@ -80,26 +83,56 @@ void FGaussianViewExtension::SubscribeToPostProcessingPass(
 		return;
 	}
 
-	// CineCamera DOF: must inject at BeforeDOF (extension runs immediately before DiaphragmDOF).
-	// Plugin DOF: inject AfterDOF/MB then compute blur (default pass is fine).
-	int32 DesiredPass = GaussianSimVerse::RenderSettings::GetPostProcessPass();
-	if (Renderer.WantsCineCameraDepthOfField()
-		&& GaussianSimVerse::RenderSettings::IsAutoBeforeDofForProxyDofEnabled())
+	const bool bCineCameraDof = Renderer.WantsCineCameraDepthOfField()
+		&& GaussianSimVerse::RenderSettings::IsAutoBeforeDofForProxyDofEnabled();
+
+	// CineCamera DOF needs soft depth before Diaphragm DOF.
+	// Color MUST composite before tonemap (linear multi-splat + engine film curve) for natural soft
+	// ellipsoids. After-tonemap over creates hard contours and wrong layering.
+	// Split: BeforeDOF = soft depth + stash linear overlay (SceneColor untouched for AE histogram
+	// when AE is captured early); AfterDOF = composite into HDR SceneColor.
+	if (bCineCameraDof)
 	{
-		DesiredPass = 0;
+		if (PassId == EPostProcessingPass::BeforeDOF)
+		{
+			InOutPassCallbacks.Add(FAfterPassCallbackDelegate::CreateLambda(
+				[this](FRDGBuilder& GraphBuilder, const FSceneView& View, const FPostProcessMaterialInputs& Inputs)
+				{
+					return InjectGaussiansPostProcess_RenderThread(
+						GraphBuilder, View, Inputs,
+						FGaussianRenderer::EInjectMode::SoftDepthAndOverlay,
+						/*bAfterTonemap=*/false);
+				}));
+		}
+		// Prefer AfterDOF so engine tonemap softens the blended cloud. Fall back to Tonemap only if
+		// AfterDOF is disabled (rare).
+		if (bIsPassEnabled && PassId == EPostProcessingPass::AfterDOF)
+		{
+			InOutPassCallbacks.Add(FAfterPassCallbackDelegate::CreateLambda(
+				[this](FRDGBuilder& GraphBuilder, const FSceneView& View, const FPostProcessMaterialInputs& Inputs)
+				{
+					return InjectGaussiansPostProcess_RenderThread(
+						GraphBuilder, View, Inputs,
+						FGaussianRenderer::EInjectMode::CompositePending,
+						/*bAfterTonemap=*/false);
+				}));
+		}
+		return;
 	}
+
+	int32 DesiredPass = GaussianSimVerse::RenderSettings::GetPostProcessPass();
 
 	bool bSubscribe = false;
 	if (DesiredPass == 0)
 	{
-		// BeforeDOF extension chain runs even when bIsPassEnabled is false on some builds.
+		// BeforeDOF chain can run even when bIsPassEnabled is false on some builds.
 		bSubscribe = (PassId == EPostProcessingPass::BeforeDOF);
 	}
 	else if (DesiredPass == 1)
 	{
 		bSubscribe = bIsPassEnabled && PassId == EPostProcessingPass::AfterDOF;
 	}
-	else
+	else if (DesiredPass == 3)
 	{
 		const bool bMotionBlurWillRun = GaussianViewExtensionPrivate::WillMotionBlurPassRun(InView);
 		if (bMotionBlurWillRun)
@@ -111,20 +144,34 @@ void FGaussianViewExtension::SubscribeToPostProcessingPass(
 			bSubscribe = bIsPassEnabled && PassId == EPostProcessingPass::AfterDOF;
 		}
 	}
+	else // DesiredPass == 2: after tonemap (default)
+	{
+		// BL_SceneColorAfterTonemapping — scene already exposed correctly for cubes/sky.
+		bSubscribe = bIsPassEnabled && PassId == EPostProcessingPass::Tonemap;
+	}
 
 	if (!bSubscribe)
 	{
 		return;
 	}
 
-	InOutPassCallbacks.Add(
-		FAfterPassCallbackDelegate::CreateRaw(this, &FGaussianViewExtension::InjectGaussiansPostProcess_RenderThread));
+	const bool bAfterTonemap = (DesiredPass == 2);
+	InOutPassCallbacks.Add(FAfterPassCallbackDelegate::CreateLambda(
+		[this, bAfterTonemap](FRDGBuilder& GraphBuilder, const FSceneView& View, const FPostProcessMaterialInputs& Inputs)
+		{
+			return InjectGaussiansPostProcess_RenderThread(
+				GraphBuilder, View, Inputs,
+				FGaussianRenderer::EInjectMode::Full,
+				bAfterTonemap);
+		}));
 }
 
 FScreenPassTexture FGaussianViewExtension::InjectGaussiansPostProcess_RenderThread(
 	FRDGBuilder& GraphBuilder,
 	const FSceneView& View,
-	const FPostProcessMaterialInputs& Inputs)
+	const FPostProcessMaterialInputs& Inputs,
+	FGaussianRenderer::EInjectMode InjectMode,
+	bool bAfterTonemap)
 {
 	const FScreenPassTexture SceneColor = FScreenPassTexture::CopyFromSlice(
 		GraphBuilder,
@@ -135,21 +182,37 @@ FScreenPassTexture FGaussianViewExtension::InjectGaussiansPostProcess_RenderThre
 		return Inputs.ReturnUntouchedSceneColorForPostProcessing(GraphBuilder);
 	}
 
+	// Soft-depth @ BeforeDOF: raster + merge depth only. Never replace SceneColor (AE must not see gaussians).
+	if (InjectMode == FGaussianRenderer::EInjectMode::SoftDepthAndOverlay)
+	{
+		Renderer.RenderGaussiansForView(
+			GraphBuilder, View, SceneColor.Texture, SceneColor.ViewRect,
+			/*PreferredOutput=*/nullptr, bAfterTonemap, InjectMode);
+		// Correctly honor OverrideOutput (copy-through) so the PP chain never gets an uncleared target.
+		return Inputs.ReturnUntouchedSceneColorForPostProcessing(GraphBuilder);
+	}
+
 	const bool bPlugin = Renderer.WantsPluginDepthOfField();
 
-	// CineCamera: inject before DiaphragmDOF (AutoBeforeDof). Progressive CoC uses soft nearest-
-	// splat DeviceZ merged into SceneDepth after raster — not proxy CustomDepth (hull flattens CoC).
-	// Focus / aperture: CineCamera actor, not plugin sliders.
-	Renderer.RenderGaussiansForView(GraphBuilder, View, SceneColor.Texture, SceneColor.ViewRect);
+	FRDGTextureRef PreferredOutput = Inputs.OverrideOutput.IsValid()
+		? Inputs.OverrideOutput.Texture
+		: nullptr;
 
-	// Plugin path: custom CoC blur after inject; not driven by CineCamera focus.
+	FRDGTextureRef OutputTexture = Renderer.RenderGaussiansForView(
+		GraphBuilder, View, SceneColor.Texture, SceneColor.ViewRect,
+		PreferredOutput, bAfterTonemap, InjectMode);
+
+	FScreenPassTexture Result(
+		OutputTexture ? OutputTexture : SceneColor.Texture,
+		SceneColor.ViewRect);
+
 	if (bPlugin)
 	{
 		Renderer.ApplyProxyDepthOfField_RenderThread(
-			GraphBuilder, View, SceneColor.Texture, SceneColor.ViewRect);
+			GraphBuilder, View, Result.Texture, Result.ViewRect);
 	}
 
-	return SceneColor;
+	return Result;
 }
 
 bool FGaussianViewExtension::IsActiveThisFrame_Internal(const FSceneViewExtensionContext& Context) const

@@ -209,20 +209,22 @@ namespace GaussianSimVerse::RenderSettings
 
 	TAutoConsoleVariable<int32> CVarPostProcessPass(
 		TEXT("r.GaussianSimVerse.PostProcessPass"),
-		2,
-		TEXT("Which post-process pass injects Gaussian splats.\n")
-		TEXT("0: BeforeDOF (required for engine Cinematic DOF on gaussians)\n")
-		TEXT("1: AfterDOF (still affected by Motion Blur)\n")
-		TEXT("2: AfterMotionBlur (default — most stable while moving; skips engine DOF)"),
+		1,
+		TEXT("Which post-process pass injects Gaussian color (when CineCamera auto-split is off).\n")
+		TEXT("0: BeforeDOF\n")
+		TEXT("1: AfterDOF / before tonemap (default — natural soft multi-splat through engine tonemap)\n")
+		TEXT("2: AfterTonemap (best mesh exposure isolation; soft edges approximated via filmic map)\n")
+		TEXT("3: AfterMotionBlur / before bloom (legacy)\n")
+		TEXT("Note: CineCamera DOF split uses soft depth @ BeforeDOF and color @ AfterDOF."),
 		ECVF_RenderThreadSafe);
 
 	TAutoConsoleVariable<int32> CVarAutoBeforeDofForProxyDof(
 		TEXT("r.GaussianSimVerse.AutoBeforeDofForProxyDof"),
 		1,
-		TEXT("When Enable Proxy Depth Of Field is on, force gaussian inject at BeforeDOF so\n")
-		TEXT("CineCamera / Diaphragm DOF can blur gaussians. Also merges CustomDepth→SceneDepth late.\n")
-		TEXT("0: Off (honor r.GaussianSimVerse.PostProcessPass; CineCamera DOF will miss gaussians)\n")
-		TEXT("1: On (default — required for CineCamera DOF on gaussians)"),
+		TEXT("When CineCamera DOF is on, split inject: soft depth @ BeforeDOF, color @ AfterDOF.\n")
+		TEXT("Soft depth feeds Diaphragm DOF; color is linear multi-splat then engine tonemap (natural soft edges).\n")
+		TEXT("0: Off (honor r.GaussianSimVerse.PostProcessPass only; CineCamera DOF may miss gaussians)\n")
+		TEXT("1: On (default)"),
 		ECVF_RenderThreadSafe);
 
 	TAutoConsoleVariable<int32> CVarPluginDofBlur(

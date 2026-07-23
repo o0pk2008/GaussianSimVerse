@@ -247,7 +247,7 @@ namespace GaussianSimVerse::RenderSettings
 	/** 0 = BeforeDOF, 1 = AfterDOF, 2 = AfterMotionBlur (manual CVar only). */
 	FORCEINLINE int32 GetPostProcessPass()
 	{
-		return FMath::Clamp(CVarPostProcessPass.GetValueOnAnyThread(), 0, 2);
+		return FMath::Clamp(CVarPostProcessPass.GetValueOnAnyThread(), 0, 3);
 	}
 
 	FORCEINLINE bool IsAutoBeforeDofForProxyDofEnabled()

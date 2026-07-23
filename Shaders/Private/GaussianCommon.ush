@@ -244,19 +244,25 @@ float3 LoadGaussianShRestVec3(StructuredBuffer<float> GaussianShCoeffs, uint Gau
 		LoadGaussianShCoeff(GaussianShCoeffs, GaussianIndex, Base + 2u));
 }
 
-/** Inverse of PlayCanvas/PLY->UE direction (-x,-z,-y); SH coeffs stay in source PLY basis. */
+/**
+ * Inverse of authoring→UE map at import:
+ *   UE = (plyX, -plyZ, -plyY)  =>  PLY = (ueX, -ueZ, -ueY)
+ * SH coefficients stay in source PLY / SuperSplat basis.
+ */
 float3 UeToPlyDirection(float3 UeDir)
 {
-	// UE = (-plyX, -plyZ, -plyY)  =>  PLY = (-ueX, -ueZ, -ueY)
-	return normalize(float3(-UeDir.x, -UeDir.z, -UeDir.y));
+	return normalize(float3(UeDir.x, -UeDir.z, -UeDir.y));
 }
 
-/** Map 3DGS/SuperSplat LDR colors into UE scene-linear for post-process tonemapping. */
-float3 PrepareGaussianColorForScene(float3 Color)
+/**
+ * Map 3DGS/SuperSplat colors into linear working space for multi-splat accumulation.
+ * SuperSplat presents display-referred colors; always sRGB→linear for correct alpha.
+ * (bAfterTonemap is kept for API compatibility; composite handles display encode.)
+ */
+float3 PrepareGaussianColorForScene(float3 Color, uint bAfterTonemap)
 {
 	Color = saturate(Color);
-	// SuperSplat presents display-referred colors on an sRGB surface. SceneColor is linear
-	// and goes through UE's tonemapper — without sRGB->linear, results look washed-out/pale.
+	// Always linearize. After-tonemap SceneColor blending is done in CompositeCS.
 	return pow(Color, 2.2);
 }
 
@@ -305,12 +311,13 @@ float3 EvaluateGaussianShRadiance(
 	float3 FallbackLinearRgb,
 	float3 ClrOffset,
 	float3 ClrScaleRGB,
-	float Saturation)
+	float Saturation,
+	uint bAfterTonemap)
 {
 	const uint Degree = min(RenderShDegree, ImportedShDegree);
 	if (bHasShCoefficients == 0u || Degree == 0u)
 	{
-		return ApplyGaussianColorGrade(PrepareGaussianColorForScene(FallbackLinearRgb), ClrOffset, ClrScaleRGB, Saturation);
+		return ApplyGaussianColorGrade(PrepareGaussianColorForScene(FallbackLinearRgb, bAfterTonemap), ClrOffset, ClrScaleRGB, Saturation);
 	}
 
 	WorldViewDir = UeToPlyDirection(WorldViewDir);
@@ -376,7 +383,7 @@ float3 EvaluateGaussianShRadiance(
 		}
 	}
 
-	return ApplyGaussianColorGrade(PrepareGaussianColorForScene(rgb), ClrOffset, ClrScaleRGB, Saturation);
+	return ApplyGaussianColorGrade(PrepareGaussianColorForScene(rgb, bAfterTonemap), ClrOffset, ClrScaleRGB, Saturation);
 }
 
 float3 ComputeGaussianWorldViewDir(
