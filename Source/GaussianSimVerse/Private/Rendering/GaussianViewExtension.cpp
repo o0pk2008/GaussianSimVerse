@@ -86,13 +86,32 @@ void FGaussianViewExtension::SubscribeToPostProcessingPass(
 	const bool bCineCameraDof = Renderer.WantsCineCameraDepthOfField()
 		&& GaussianSimVerse::RenderSettings::IsAutoBeforeDofForProxyDofEnabled();
 
-	// CineCamera / Diaphragm DOF samples SceneColor + SceneDepth at the DOF pass.
-	// Soft-depth merge alone is not enough: gaussian COLOR must already be in SceneColor so the
-	// engine can blur it. Inject Full (raster + soft-depth→SceneDepth + composite) at BeforeDOF.
-	// (AfterDOF-only color leaves sharp gaussians painted on top of a blurred empty scene.)
+	// CineCamera DOF:
+	//   Mode 0 EngineFull (default): Full inject at BeforeDOF — soft-depth→SceneDepth + color into
+	//     SceneColor so engine Diaphragm DOF blurs gaussians (natural previous look).
+	//   Mode 1 Dual: soft-depth BeforeDOF, color+relight AfterDOF, then approx CoC on gaussians only
+	//     (better lighting isolation; DOF is less natural than engine Diaphragm).
 	if (bCineCameraDof)
 	{
-		// BeforeDOF callbacks can run even when bIsPassEnabled is false on some builds.
+		const int32 DofMode = GaussianSimVerse::RenderSettings::GetCineCameraDofMode();
+		if (DofMode <= 0)
+		{
+			// EngineFull — BeforeDOF can run even when bIsPassEnabled is false on some builds.
+			if (PassId == EPostProcessingPass::BeforeDOF)
+			{
+				InOutPassCallbacks.Add(FAfterPassCallbackDelegate::CreateLambda(
+					[this](FRDGBuilder& GraphBuilder, const FSceneView& View, const FPostProcessMaterialInputs& Inputs)
+					{
+						return InjectGaussiansPostProcess_RenderThread(
+							GraphBuilder, View, Inputs,
+							FGaussianRenderer::EInjectMode::Full,
+							/*bAfterTonemap=*/false);
+					}));
+			}
+			return;
+		}
+
+		// Dual (optional)
 		if (PassId == EPostProcessingPass::BeforeDOF)
 		{
 			InOutPassCallbacks.Add(FAfterPassCallbackDelegate::CreateLambda(
@@ -100,7 +119,18 @@ void FGaussianViewExtension::SubscribeToPostProcessingPass(
 				{
 					return InjectGaussiansPostProcess_RenderThread(
 						GraphBuilder, View, Inputs,
-						FGaussianRenderer::EInjectMode::Full,
+						FGaussianRenderer::EInjectMode::SoftDepthAndOverlay,
+						/*bAfterTonemap=*/false);
+				}));
+		}
+		if (bIsPassEnabled && PassId == EPostProcessingPass::AfterDOF)
+		{
+			InOutPassCallbacks.Add(FAfterPassCallbackDelegate::CreateLambda(
+				[this](FRDGBuilder& GraphBuilder, const FSceneView& View, const FPostProcessMaterialInputs& Inputs)
+				{
+					return InjectGaussiansPostProcess_RenderThread(
+						GraphBuilder, View, Inputs,
+						FGaussianRenderer::EInjectMode::CompositePending,
 						/*bAfterTonemap=*/false);
 				}));
 		}
@@ -180,6 +210,11 @@ FScreenPassTexture FGaussianViewExtension::InjectGaussiansPostProcess_RenderThre
 	}
 
 	const bool bPlugin = Renderer.WantsPluginDepthOfField();
+	const bool bCineDualAfterComposite =
+		InjectMode == FGaussianRenderer::EInjectMode::CompositePending
+		&& Renderer.WantsCineCameraDepthOfField()
+		&& GaussianSimVerse::RenderSettings::IsAutoBeforeDofForProxyDofEnabled()
+		&& GaussianSimVerse::RenderSettings::GetCineCameraDofMode() > 0;
 
 	FRDGTextureRef PreferredOutput = Inputs.OverrideOutput.IsValid()
 		? Inputs.OverrideOutput.Texture
@@ -193,10 +228,27 @@ FScreenPassTexture FGaussianViewExtension::InjectGaussiansPostProcess_RenderThre
 		OutputTexture ? OutputTexture : SceneColor.Texture,
 		SceneColor.ViewRect);
 
-	if (bPlugin)
+	if (bPlugin || bCineDualAfterComposite)
 	{
+		FRDGTextureRef SoftDepthBits = nullptr;
+		FRDGTextureRef OverlayMask = nullptr;
+		FIntPoint SoftOffset = FIntPoint::ZeroValue;
+		if (bCineDualAfterComposite)
+		{
+			FRDGTextureRef UnusedOverlay = nullptr;
+			FIntRect DeferredRect;
+			FIntPoint DeferredOffset;
+			if (Renderer.FindDeferredOverlay_RenderThread(
+				View.GetViewKey(), UnusedOverlay, SoftDepthBits, DeferredRect, DeferredOffset))
+			{
+				OverlayMask = UnusedOverlay;
+				SoftOffset = FIntPoint::ZeroValue; // SoftDepthBits is view-local (0-based)
+			}
+		}
+
 		Renderer.ApplyProxyDepthOfField_RenderThread(
-			GraphBuilder, View, Result.Texture, Result.ViewRect);
+			GraphBuilder, View, Result.Texture, Result.ViewRect,
+			SoftDepthBits, OverlayMask, SoftOffset);
 	}
 
 	return Result;

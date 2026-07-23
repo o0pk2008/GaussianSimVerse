@@ -660,11 +660,16 @@ public:
 		SHADER_PARAMETER(uint32, bHasCustomStencil)
 		SHADER_PARAMETER(uint32, bHasCustomDepth)
 		SHADER_PARAMETER(uint32, bHasSceneDepth)
+		SHADER_PARAMETER(uint32, bHasSoftDepth)
+		SHADER_PARAMETER(uint32, bMaskByOverlayAlpha)
+		SHADER_PARAMETER(FIntPoint, SoftDepthOffset)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SceneColorTexture)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SceneDepthTexture)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, CustomDepthTexture)
 		// Prefer Texture2D (not uint2) so binding PF_X24_G8 / dummy views does not mismatch HLSL type.
 		SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D, CustomStencilTexture)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<uint>, SoftDepthBitsTexture)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, OverlayTexture)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWOutput)
 	END_SHADER_PARAMETER_STRUCT()
 

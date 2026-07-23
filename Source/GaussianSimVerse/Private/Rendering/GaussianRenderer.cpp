@@ -733,7 +733,7 @@ FRDGTextureRef FGaussianRenderer::RenderGaussiansForView(
 		}
 	}
 
-	// Stash overlay for AfterTonemap composite (do not write SceneColor here — keeps eye adaptation correct).
+	// Stash overlay (+ soft depth) for AfterDOF color composite / Dual CoC (SceneColor untouched here).
 	if (InjectMode == EInjectMode::SoftDepthAndOverlay && DeferredOverlay)
 	{
 		const uint32 ViewKey = View.GetViewKey();
@@ -743,6 +743,7 @@ FRDGTextureRef FGaussianRenderer::RenderGaussiansForView(
 			if (Entry.ViewKey == ViewKey)
 			{
 				Entry.Overlay = DeferredOverlay;
+				Entry.SoftDepthBits = SoftDepthBits;
 				Entry.SceneColorViewRect = SceneColorViewRect;
 				Entry.SceneColorOffset = DeferredSceneColorOffset;
 				bReplaced = true;
@@ -754,6 +755,7 @@ FRDGTextureRef FGaussianRenderer::RenderGaussiansForView(
 			FDeferredOverlay Entry;
 			Entry.ViewKey = ViewKey;
 			Entry.Overlay = DeferredOverlay;
+			Entry.SoftDepthBits = SoftDepthBits;
 			Entry.SceneColorViewRect = SceneColorViewRect;
 			Entry.SceneColorOffset = DeferredSceneColorOffset;
 			DeferredOverlays.Add(Entry);
@@ -764,10 +766,10 @@ FRDGTextureRef FGaussianRenderer::RenderGaussiansForView(
 		{
 			bLoggedSplitInjectOnce = true;
 			UE_LOG(LogGaussianSimVerse, Log,
-				TEXT("GaussianSimVerse: SoftDepthAndOverlay — soft depth @ BeforeDOF, color composite deferred"));
+				TEXT("GaussianSimVerse: Dual CineCamera — soft depth @ BeforeDOF, color+relight @ AfterDOF, CoC on gaussians after composite"));
 		}
 
-		// Return input SceneColor untouched so AE / tonemap only see meshes + sky.
+		// Return input SceneColor untouched so AE / tonemap only see meshes + sky until AfterDOF.
 		return SceneColorTexture;
 	}
 
@@ -1006,11 +1008,35 @@ bool FGaussianRenderer::GetActiveDofSettings(
 	return bFound;
 }
 
+bool FGaussianRenderer::FindDeferredOverlay_RenderThread(
+	uint32 ViewKey,
+	FRDGTextureRef& OutOverlay,
+	FRDGTextureRef& OutSoftDepthBits,
+	FIntRect& OutViewRect,
+	FIntPoint& OutSceneColorOffset) const
+{
+	for (const FDeferredOverlay& Entry : DeferredOverlays)
+	{
+		if (Entry.ViewKey == ViewKey && Entry.Overlay)
+		{
+			OutOverlay = Entry.Overlay;
+			OutSoftDepthBits = Entry.SoftDepthBits;
+			OutViewRect = Entry.SceneColorViewRect;
+			OutSceneColorOffset = Entry.SceneColorOffset;
+			return true;
+		}
+	}
+	return false;
+}
+
 void FGaussianRenderer::ApplyProxyDepthOfField_RenderThread(
 	FRDGBuilder& GraphBuilder,
 	const FSceneView& View,
 	FRDGTextureRef SceneColorTexture,
-	const FIntRect& SceneColorViewRect) const
+	const FIntRect& SceneColorViewRect,
+	FRDGTextureRef SoftDepthBitsTexture,
+	FRDGTextureRef OverlayMaskTexture,
+	FIntPoint SoftDepthOffset) const
 {
 	float FocalCm = 500.0f;
 	float CocScale = 0.004f;
@@ -1022,6 +1048,12 @@ void FGaussianRenderer::ApplyProxyDepthOfField_RenderThread(
 		|| SceneColorViewRect.Height() <= 0)
 	{
 		return;
+	}
+
+	// Prefer live CineCamera / PP focal distance when available (cm).
+	if (View.FinalPostProcessSettings.DepthOfFieldFocalDistance > 1.0f)
+	{
+		FocalCm = View.FinalPostProcessSettings.DepthOfFieldFocalDistance;
 	}
 
 	const FGlobalShaderMap* ShaderMap = GetGlobalShaderMap(View.GetFeatureLevel());
@@ -1048,28 +1080,29 @@ void FGaussianRenderer::ApplyProxyDepthOfField_RenderThread(
 		}
 	}
 
-	if (!CustomDepth)
+	const bool bHasSoftDepth = SoftDepthBitsTexture != nullptr;
+	if (!CustomDepth && !bHasSoftDepth && !SceneDepth)
 	{
-		// Without custom depth, CoC has no proxy geometry — skip (do not force SceneDepth write).
 		static bool bLoggedOnce = false;
 		if (!bLoggedOnce)
 		{
 			bLoggedOnce = true;
 			UE_LOG(LogGaussianSimVerse, Warning,
-				TEXT("GaussianSimVerse DOF skipped: no CustomDepth. Enable Write Custom Depth on the proxy and r.CustomDepth 3."));
+				TEXT("GaussianSimVerse DOF skipped: no SoftDepth/CustomDepth/SceneDepth. Enable proxy Custom Depth (r.CustomDepth 3) or CineCamera soft-depth."));
 		}
 		return;
 	}
 
 	FRDGTextureRef SafeSceneDepth = SceneDepth ? SceneDepth : GSystemTextures.GetDepthDummy(GraphBuilder);
+	// Bindable stubs when optional resources are missing.
+	FRDGTextureRef SafeCustomDepth = CustomDepth ? CustomDepth : SafeSceneDepth;
 	FRDGTextureSRVRef SafeStencil = CustomStencil;
 	if (!SafeStencil)
 	{
-		// Legal bind only: real DepthStencil texture.
-		if (CustomDepth->Desc.Format == PF_DepthStencil)
+		if (SafeCustomDepth->Desc.Format == PF_DepthStencil)
 		{
 			SafeStencil = GraphBuilder.CreateSRV(
-				FRDGTextureSRVDesc::CreateWithPixelFormat(CustomDepth, PF_X24_G8));
+				FRDGTextureSRVDesc::CreateWithPixelFormat(SafeCustomDepth, PF_X24_G8));
 		}
 		else if (SafeSceneDepth->Desc.Format == PF_DepthStencil)
 		{
@@ -1078,8 +1111,40 @@ void FGaussianRenderer::ApplyProxyDepthOfField_RenderThread(
 		}
 		else
 		{
-			return;
+			// 1x1 legal stencil view.
+			const FRDGTextureDesc DummyDesc = FRDGTextureDesc::Create2D(
+				FIntPoint(1, 1),
+				PF_DepthStencil,
+				FClearValueBinding::DepthFar,
+				TexCreate_ShaderResource | TexCreate_DepthStencilTargetable | TexCreate_InputAttachmentRead);
+			FRDGTextureRef DummyDS = GraphBuilder.CreateTexture(DummyDesc, TEXT("Gaussian.DofDummyDS"));
+			AddClearDepthStencilPass(GraphBuilder, DummyDS, true, 0.0f, true, 0);
+			SafeStencil = GraphBuilder.CreateSRV(FRDGTextureSRVDesc::CreateWithPixelFormat(DummyDS, PF_X24_G8));
 		}
+	}
+
+	FRDGTextureRef SafeSoftDepth = SoftDepthBitsTexture;
+	if (!SafeSoftDepth)
+	{
+		FRDGTextureDesc SoftDummyDesc = FRDGTextureDesc::Create2D(
+			FIntPoint(1, 1),
+			PF_R32_UINT,
+			FClearValueBinding::Black,
+			TexCreate_ShaderResource | TexCreate_UAV);
+		SafeSoftDepth = GraphBuilder.CreateTexture(SoftDummyDesc, TEXT("Gaussian.DofSoftDummy"));
+		AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(SafeSoftDepth), 0u);
+	}
+
+	FRDGTextureRef SafeOverlay = OverlayMaskTexture;
+	if (!SafeOverlay)
+	{
+		FRDGTextureDesc OvDesc = FRDGTextureDesc::Create2D(
+			FIntPoint(1, 1),
+			PF_FloatRGBA,
+			FClearValueBinding::White,
+			TexCreate_ShaderResource | TexCreate_UAV);
+		SafeOverlay = GraphBuilder.CreateTexture(OvDesc, TEXT("Gaussian.DofOverlayDummy"));
+		AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(SafeOverlay), FVector4f(1, 1, 1, 1));
 	}
 
 	const FIntPoint TextureSize = SceneColorTexture->Desc.Extent;
@@ -1088,6 +1153,9 @@ void FGaussianRenderer::ApplyProxyDepthOfField_RenderThread(
 		static_cast<float>(SceneColorViewRect.Min.Y),
 		static_cast<float>(SceneColorViewRect.Width()),
 		static_cast<float>(SceneColorViewRect.Height()));
+
+	const uint32 bMaskOverlay = OverlayMaskTexture ? 1u : 0u;
+	const uint32 bSoft = bHasSoftDepth ? 1u : 0u;
 
 	auto DispatchDofPass = [&](FRDGTextureRef SourceColor, FRDGTextureRef DestColor, FVector2f Direction)
 	{
@@ -1101,12 +1169,17 @@ void FGaussianRenderer::ApplyProxyDepthOfField_RenderThread(
 		Params->InvDeviceZToWorldZTransform = View.InvDeviceZToWorldZTransform;
 		Params->ProxyStencil = ProxyStencil;
 		Params->bHasCustomStencil = CustomStencil ? 1u : 0u;
-		Params->bHasCustomDepth = 1u;
+		Params->bHasCustomDepth = CustomDepth ? 1u : 0u;
 		Params->bHasSceneDepth = SceneDepth ? 1u : 0u;
+		Params->bHasSoftDepth = bSoft;
+		Params->bMaskByOverlayAlpha = bMaskOverlay;
+		Params->SoftDepthOffset = SoftDepthOffset;
 		Params->SceneColorTexture = SourceColor;
 		Params->SceneDepthTexture = SafeSceneDepth;
-		Params->CustomDepthTexture = CustomDepth;
+		Params->CustomDepthTexture = SafeCustomDepth;
 		Params->CustomStencilTexture = SafeStencil;
+		Params->SoftDepthBitsTexture = SafeSoftDepth;
+		Params->OverlayTexture = SafeOverlay;
 		Params->RWOutput = GraphBuilder.CreateUAV(DestColor);
 
 		const FIntVector Groups(

@@ -35,8 +35,13 @@ namespace GaussianSimVerse::RenderSettings
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<float> CVarMinSigmaPixels;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarUseResolvedSceneColor;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarPostProcessPass;
-	/** When 1, CineCamera DOF forces Full BeforeDOF inject (color+soft-depth) even if PostProcessPass is 1/2. */
+	/** When 1, CineCamera DOF enables specialized inject (see CineCameraDofMode). */
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarAutoBeforeDofForProxyDof;
+	/**
+	 * 0: EngineFull (default) — Full BeforeDOF, natural engine Diaphragm DOF.
+	 * 1: Dual — AfterDOF color/relight + approximate CoC on gaussians (lighting-first).
+	 */
+	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarCineCameraDofMode;
 	/** When 1, also run plugin CoC blur after inject (optional; CineCamera usually enough). */
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarPluginDofBlur;
 	/** Occlude Gaussian pixels behind opaque scene depth (mix with regular actors). */
@@ -253,6 +258,12 @@ namespace GaussianSimVerse::RenderSettings
 	FORCEINLINE bool IsAutoBeforeDofForProxyDofEnabled()
 	{
 		return CVarAutoBeforeDofForProxyDof.GetValueOnAnyThread() != 0;
+	}
+
+	/** 0 = EngineFull BeforeDOF (default, natural DOF), 1 = Dual AfterDOF color + approx CoC. */
+	FORCEINLINE int32 GetCineCameraDofMode()
+	{
+		return FMath::Clamp(CVarCineCameraDofMode.GetValueOnAnyThread(), 0, 1);
 	}
 
 	FORCEINLINE bool IsDepthOcclusionEnabled()

@@ -1,5 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
-// Separable CoC blur for GaussianSimVerse proxy DOF (CustomDepth-based).
+// Separable CoC blur for GaussianSimVerse.
+// Depth priority: SoftDepthBits (per-splat) > CustomDepth proxy > SceneDepth.
+// Optional OverlayAlpha: only blur where gaussians cover (Dual CineCamera path avoids double-blurring meshes).
 
 #include "/Engine/Public/Platform.ush"
 
@@ -14,12 +16,17 @@ uint ProxyStencil;
 uint bHasCustomStencil;
 uint bHasCustomDepth;
 uint bHasSceneDepth;
+uint bHasSoftDepth;
+uint bMaskByOverlayAlpha;
+int2 SoftDepthOffset;
 
 Texture2D SceneColorTexture;
 Texture2D SceneDepthTexture;
 Texture2D CustomDepthTexture;
 // Bound as stencil plane SRV (PF_X24_G8). Load .g for stencil value when available.
 Texture2D CustomStencilTexture;
+Texture2D<uint> SoftDepthBitsTexture;
+Texture2D OverlayTexture;
 RWTexture2D<float4> RWOutput;
 
 float ConvertDeviceZ(float DeviceZ)
@@ -32,14 +39,24 @@ float ConvertDeviceZ(float DeviceZ)
 	return Linear;
 }
 
-float SampleLinearDepth(int2 Pixel)
+float SampleLinearDepth(int2 Pixel, int2 LocalPixel)
 {
+	// Nearest-splat soft DeviceZ (reverse-Z bits) — best CoC for the gaussian cloud.
+	if (bHasSoftDepth != 0u)
+	{
+		const int2 SoftPixel = LocalPixel + SoftDepthOffset;
+		const uint Bits = SoftDepthBitsTexture.Load(int3(SoftPixel, 0));
+		if (Bits != 0u)
+		{
+			return max(ConvertDeviceZ(asfloat(Bits)), 1e-2);
+		}
+	}
+
 	bool bUseCustom = false;
 	if (bHasCustomDepth != 0u)
 	{
 		if (bHasCustomStencil != 0u)
 		{
-			// Stencil plane is often uint in .g; Load as float4 and cast.
 			const float4 St = CustomStencilTexture.Load(int3(Pixel, 0));
 			const uint Stencil = (uint)St.g;
 			bUseCustom = (Stencil == ProxyStencil);
@@ -79,12 +96,24 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 
 	const int2 Pixel = Local + int2(ViewRect.xy);
 	const int2 MaxPix = max(TextureSize - int2(1, 1), int2(0, 0));
-
-	const float CenterDepth = SampleLinearDepth(Pixel);
-	const float Coc = saturate(abs(CenterDepth - FocalDistanceCm) * CocScale);
-	const float Radius = Coc * MaxBlurRadiusPx;
-
 	const float4 CenterColor = SceneColorTexture.Load(int3(Pixel, 0));
+
+	// Dual path: only CoC-blur gaussian coverage; leave pure mesh pixels (already engine-DOF'd).
+	float OverlayA = 1.0;
+	if (bMaskByOverlayAlpha != 0u)
+	{
+		OverlayA = saturate(OverlayTexture.Load(int3(Local, 0)).a);
+		if (OverlayA < (1.0 / 255.0))
+		{
+			RWOutput[Pixel] = CenterColor;
+			return;
+		}
+	}
+
+	const float CenterDepth = SampleLinearDepth(Pixel, Local);
+	const float Coc = saturate(abs(CenterDepth - FocalDistanceCm) * CocScale);
+	const float Radius = Coc * MaxBlurRadiusPx * OverlayA;
+
 	if (Radius < 0.5)
 	{
 		RWOutput[Pixel] = CenterColor;
@@ -113,5 +142,7 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 		WSum += Wi * 2.0;
 	}
 
-	RWOutput[Pixel] = Acc / max(WSum, 1e-4);
+	const float4 Blurred = Acc / max(WSum, 1e-4);
+	// Soft mask: fully covered gaussians get full CoC; edges blend with sharp composite.
+	RWOutput[Pixel] = lerp(CenterColor, Blurred, OverlayA);
 }

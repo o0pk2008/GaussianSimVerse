@@ -80,14 +80,26 @@ public:
 	void ClearDeferredOverlays_RenderThread() const;
 
 	/**
-	 * Plugin CoC DOF after gaussians are composited. Uses proxy CustomDepth (not early SceneDepth).
-	 * Optional; CineCamera users should prefer BeforeDOF inject + late SceneDepth merge instead.
+	 * CoC blur after gaussians are composited.
+	 * Uses SoftDepthBits (per-splat) when provided, else CustomDepth proxy / SceneDepth.
+	 * When OverlayMask is set, only blurs gaussian coverage (Dual CineCamera path).
 	 */
 	void ApplyProxyDepthOfField_RenderThread(
 		FRDGBuilder& GraphBuilder,
 		const FSceneView& View,
 		FRDGTextureRef SceneColorTexture,
-		const FIntRect& SceneColorViewRect) const;
+		const FIntRect& SceneColorViewRect,
+		FRDGTextureRef SoftDepthBitsTexture = nullptr,
+		FRDGTextureRef OverlayMaskTexture = nullptr,
+		FIntPoint SoftDepthOffset = FIntPoint::ZeroValue) const;
+
+	/** Look up deferred overlay/soft-depth stashed earlier this frame (same GraphBuilder). */
+	bool FindDeferredOverlay_RenderThread(
+		uint32 ViewKey,
+		FRDGTextureRef& OutOverlay,
+		FRDGTextureRef& OutSoftDepthBits,
+		FIntRect& OutViewRect,
+		FIntPoint& OutSceneColorOffset) const;
 
 	/**
 	 * Before engine Diaphragm/Cinematic DOF: write proxy CustomDepth (stencil-tagged) into the
@@ -167,11 +179,12 @@ private:
 
 	FGaussianRelightFrameState RelightFrameState;
 
-	/** Per-view overlay stashed at BeforeDOF for AfterTonemap composite (same GraphBuilder frame). */
+	/** Per-view data stashed at BeforeDOF for AfterDOF color + Dual CoC (same GraphBuilder frame). */
 	struct FDeferredOverlay
 	{
 		uint32 ViewKey = 0;
 		FRDGTextureRef Overlay = nullptr;
+		FRDGTextureRef SoftDepthBits = nullptr;
 		FIntRect SceneColorViewRect;
 		FIntPoint SceneColorOffset = FIntPoint::ZeroValue;
 	};
