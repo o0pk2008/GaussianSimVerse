@@ -86,13 +86,13 @@ void FGaussianViewExtension::SubscribeToPostProcessingPass(
 	const bool bCineCameraDof = Renderer.WantsCineCameraDepthOfField()
 		&& GaussianSimVerse::RenderSettings::IsAutoBeforeDofForProxyDofEnabled();
 
-	// CineCamera DOF needs soft depth before Diaphragm DOF.
-	// Color MUST composite before tonemap (linear multi-splat + engine film curve) for natural soft
-	// ellipsoids. After-tonemap over creates hard contours and wrong layering.
-	// Split: BeforeDOF = soft depth + stash linear overlay (SceneColor untouched for AE histogram
-	// when AE is captured early); AfterDOF = composite into HDR SceneColor.
+	// CineCamera / Diaphragm DOF samples SceneColor + SceneDepth at the DOF pass.
+	// Soft-depth merge alone is not enough: gaussian COLOR must already be in SceneColor so the
+	// engine can blur it. Inject Full (raster + soft-depth→SceneDepth + composite) at BeforeDOF.
+	// (AfterDOF-only color leaves sharp gaussians painted on top of a blurred empty scene.)
 	if (bCineCameraDof)
 	{
+		// BeforeDOF callbacks can run even when bIsPassEnabled is false on some builds.
 		if (PassId == EPostProcessingPass::BeforeDOF)
 		{
 			InOutPassCallbacks.Add(FAfterPassCallbackDelegate::CreateLambda(
@@ -100,20 +100,7 @@ void FGaussianViewExtension::SubscribeToPostProcessingPass(
 				{
 					return InjectGaussiansPostProcess_RenderThread(
 						GraphBuilder, View, Inputs,
-						FGaussianRenderer::EInjectMode::SoftDepthAndOverlay,
-						/*bAfterTonemap=*/false);
-				}));
-		}
-		// Prefer AfterDOF so engine tonemap softens the blended cloud. Fall back to Tonemap only if
-		// AfterDOF is disabled (rare).
-		if (bIsPassEnabled && PassId == EPostProcessingPass::AfterDOF)
-		{
-			InOutPassCallbacks.Add(FAfterPassCallbackDelegate::CreateLambda(
-				[this](FRDGBuilder& GraphBuilder, const FSceneView& View, const FPostProcessMaterialInputs& Inputs)
-				{
-					return InjectGaussiansPostProcess_RenderThread(
-						GraphBuilder, View, Inputs,
-						FGaussianRenderer::EInjectMode::CompositePending,
+						FGaussianRenderer::EInjectMode::Full,
 						/*bAfterTonemap=*/false);
 				}));
 		}

@@ -35,7 +35,7 @@ namespace GaussianSimVerse::RenderSettings
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<float> CVarMinSigmaPixels;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarUseResolvedSceneColor;
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarPostProcessPass;
-	/** When 1, scenes with proxy DOF force BeforeDOF inject even if PostProcessPass is 1/2. */
+	/** When 1, CineCamera DOF forces Full BeforeDOF inject (color+soft-depth) even if PostProcessPass is 1/2. */
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarAutoBeforeDofForProxyDof;
 	/** When 1, also run plugin CoC blur after inject (optional; CineCamera usually enough). */
 	extern GAUSSIANSIMVERSE_API TAutoConsoleVariable<int32> CVarPluginDofBlur;

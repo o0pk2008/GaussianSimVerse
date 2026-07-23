@@ -697,8 +697,17 @@ FRDGTextureRef FGaussianRenderer::RenderGaussiansForView(
 
 	FGaussianRenderGraph::AddPasses(GraphBuilder, PassInputs, TransientResources);
 
-	// CineCamera: push nearest-splat DeviceZ into SceneDepth so DiaphragmDOF has near→far CoC
-	// on gaussians (boxes already have real mesh depth from the base pass).
+	// CineCamera: feed SceneDepth before Diaphragm DOF (must run in the BeforeDOF inject).
+	// 1) Proxy CustomDepth → SceneDepth (shell CoC / sky-safe late merge)
+	// 2) Nearest-splat soft DeviceZ → SceneDepth (near→far falloff on the cloud itself)
+	if (PassInputs.bExportSoftDepthForDof)
+	{
+		float UnusedF = 0.f, UnusedC = 0.f, UnusedR = 0.f;
+		uint32 ProxyStencil = 1u;
+		GetActiveDofSettings(UnusedF, UnusedC, UnusedR, ProxyStencil);
+		MergeProxyCustomDepthIntoSceneDepth_RenderThread(GraphBuilder, View, ProxyStencil);
+	}
+
 	if (SoftDepthBits)
 	{
 		// Soft buffer is overlay-local (0..size); merge pass viewport must match engine SceneDepth pixels.
@@ -755,7 +764,7 @@ FRDGTextureRef FGaussianRenderer::RenderGaussiansForView(
 		{
 			bLoggedSplitInjectOnce = true;
 			UE_LOG(LogGaussianSimVerse, Log,
-				TEXT("GaussianSimVerse: split inject — soft depth @ BeforeDOF, color composite deferred to AfterTonemap (PIE exposure fix)"));
+				TEXT("GaussianSimVerse: SoftDepthAndOverlay — soft depth @ BeforeDOF, color composite deferred"));
 		}
 
 		// Return input SceneColor untouched so AE / tonemap only see meshes + sky.
